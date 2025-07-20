@@ -54,6 +54,8 @@ We developed and tested Chatterbox on Python 3.11 on Debain 11 OS; the versions 
 
 
 # Usage
+
+## Basic TTS Generation
 ```python
 import torchaudio as ta
 from chatterbox.tts import ChatterboxTTS
@@ -69,7 +71,72 @@ AUDIO_PROMPT_PATH = "YOUR_FILE.wav"
 wav = model.generate(text, audio_prompt_path=AUDIO_PROMPT_PATH)
 ta.save("test-2.wav", wav, model.sr)
 ```
-See `example_tts.py` and `example_vc.py` for more examples.
+
+## Voice Embedding for Fast Voice Cloning
+
+Chatterbox supports **voice embedding** - a powerful feature that allows you to save and reuse voice characteristics for significantly faster TTS generation. This is especially beneficial when generating multiple texts with the same voice.
+
+### How Voice Embeddings Work
+
+Voice embeddings capture the unique speaker characteristics from a reference audio file and save them as a compact `.npy` file (typically <1KB). This eliminates the need to recompute expensive speaker encodings on every generation, resulting in **substantial performance improvements** for repeated use.
+
+### Save a Voice Clone
+```python
+# One-time setup: Save voice embedding from reference audio
+model.save_voice_clone("reference_speaker.wav", "my_voice.npy")
+```
+
+### Use Saved Voice Clone
+```python
+# Fast generation using pre-saved voice embedding
+wav = model.generate(
+    "Any text you want to synthesize!",
+    saved_voice_path="my_voice.npy",        # Pre-computed voice identity (fast!)
+    audio_prompt_path="prosody_sample.wav", # Fresh audio for prosody/style
+    exaggeration=0.6,
+    cfg_weight=0.5
+)
+ta.save("output.wav", wav, model.sr)
+```
+
+### Complete Voice Cloning Example
+```python
+import torchaudio as ta
+from chatterbox.tts import ChatterboxTTS
+
+# Load model
+model = ChatterboxTTS.from_pretrained(device="cuda")
+
+# Step 1: Create and save voice clone (do this once)
+reference_audio = "speaker_sample.wav"
+voice_clone_path = "speaker_voice.npy"
+model.save_voice_clone(reference_audio, voice_clone_path)
+print(f"Voice clone saved to {voice_clone_path}")
+
+# Step 2: Generate multiple texts with the same voice (much faster!)
+texts = [
+    "Hello, this is a demonstration of voice cloning.",
+    "The saved embedding makes repeated synthesis much faster.",
+    "You can reuse this voice across different sessions."
+]
+
+for i, text in enumerate(texts):
+    wav = model.generate(
+        text,
+        saved_voice_path=voice_clone_path,
+        audio_prompt_path=reference_audio,  # Can use same or different audio for prosody
+        temperature=0.7
+    )
+    ta.save(f"output_{i+1}.wav", wav, model.sr)
+```
+
+### Benefits
+- **⚡ Performance**: Skip expensive speaker encoding on repeated generations
+- **💾 Efficiency**: Voice embeddings are tiny (~1KB) compared to audio files
+- **🔄 Reusable**: Save once, use across different sessions and applications
+- **🎯 Quality**: Maintains the same voice quality as traditional method
+
+See `example_tts.py`, `example_vc.py`, and `example_tts_with_voice_cloning.py` for more examples.
 
 # Supported Lanugage
 Currenlty only English.

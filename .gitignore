@@ -46,3 +46,7 @@ checkpoints/
 
 # Ignore generated sample .wav files
 **/*.wav
+
+# Ignore embedded voices .npy files
+**/*.npy
+
