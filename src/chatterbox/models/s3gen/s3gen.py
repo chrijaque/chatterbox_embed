@@ -104,6 +104,25 @@ class S3Token2Mel(torch.nn.Module):
         params = self.tokenizer.parameters()
         return next(params).device
 
+    @torch.inference_mode()
+    def save_voice_clone(self, ref_wav: torch.Tensor, ref_sr: int, save_path: str):
+        if isinstance(ref_wav, np.ndarray):
+            ref_wav = torch.from_numpy(ref_wav).float()
+        if len(ref_wav.shape) == 1:
+            ref_wav = ref_wav.unsqueeze(0)
+
+        device = self.device
+        ref_wav = ref_wav.to(device)
+        ref_wav_16 = get_resampler(ref_sr, S3_SR, device)(ref_wav).to(device)
+        
+        embedding = self.speaker_encoder.inference(ref_wav_16)
+        np.save(save_path, embedding.detach().cpu().numpy())
+
+    @torch.inference_mode()
+    def load_voice_clone(self, embedding_path: str) -> torch.Tensor:
+        emb = np.load(embedding_path)
+        return torch.from_numpy(emb).to(self.device)
+
     def embed_ref(
         self,
         ref_wav: torch.Tensor,

@@ -164,6 +164,14 @@ class ChatterboxTTS:
 
         return cls(t3, s3gen, ve, tokenizer, device, conds=conds)
 
+    def save_voice_clone(self, audio_file_path: str, save_path: str):
+        """Save a voice embedding from an audio file for fast reuse"""
+        import librosa
+        ref_wav, sr = librosa.load(audio_file_path, sr=None)
+        ref_wav = torch.from_numpy(ref_wav).float()
+        self.s3gen.save_voice_clone(ref_wav, sr, save_path)
+        print(f"Voice clone saved to {save_path}")
+
     @classmethod
     def from_pretrained(cls, device) -> 'ChatterboxTTS':
         # Check if MPS is available on macOS
@@ -205,6 +213,60 @@ class ChatterboxTTS:
         ).to(device=self.device)
         self.conds = Conditionals(t3_cond, s3gen_ref_dict)
 
+    def prepare_conditionals_with_saved_voice(self, saved_voice_path: str, prompt_audio_path: str, exaggeration=0.5):
+        """Prepare conditionals using a pre-saved voice embedding for faster processing"""
+        ## Load saved voice embedding
+        saved_embedding = self.s3gen.load_voice_clone(saved_voice_path)
+        
+        ## Load prompt reference wav for tokens and features (still needed)
+        s3gen_ref_wav, _sr = librosa.load(prompt_audio_path, sr=S3GEN_SR)
+        ref_16k_wav = librosa.resample(s3gen_ref_wav, orig_sr=S3GEN_SR, target_sr=S3_SR)
+
+        s3gen_ref_wav = s3gen_ref_wav[:self.DEC_COND_LEN]
+        
+        # Generate mel features and tokens from prompt audio
+        ref_wav_24 = torch.from_numpy(s3gen_ref_wav).float().to(self.device)
+        if len(ref_wav_24.shape) == 1:
+            ref_wav_24 = ref_wav_24.unsqueeze(0)
+        ref_mels_24 = self.s3gen.mel_extractor(ref_wav_24).transpose(1, 2).to(self.device)
+        
+        # Tokenize 16khz reference for prompt tokens
+        ref_16k_wav_tensor = torch.from_numpy(ref_16k_wav).float().to(self.device)[None, ]
+        ref_speech_tokens, ref_speech_token_lens = self.s3gen.tokenizer(ref_16k_wav_tensor)
+        
+        # Make sure mel_len = 2 * stoken_len
+        if ref_mels_24.shape[1] != 2 * ref_speech_tokens.shape[1]:
+            ref_speech_tokens = ref_speech_tokens[:, :ref_mels_24.shape[1] // 2]
+            ref_speech_token_lens[0] = ref_speech_tokens.shape[1]
+        
+        # Create s3gen ref_dict with saved embedding
+        s3gen_ref_dict = dict(
+            prompt_token=ref_speech_tokens.to(self.device),
+            prompt_token_len=ref_speech_token_lens,
+            prompt_feat=ref_mels_24,
+            prompt_feat_len=None,
+            embedding=saved_embedding,  # Use the pre-saved embedding!
+        )
+
+        # Speech cond prompt tokens for T3
+        if plen := self.t3.hp.speech_cond_prompt_len:
+            s3_tokzr = self.s3gen.tokenizer
+            t3_cond_prompt_tokens, _ = s3_tokzr.forward([ref_16k_wav[:self.ENC_COND_LEN]], max_len=plen)
+            t3_cond_prompt_tokens = torch.atleast_2d(t3_cond_prompt_tokens).to(self.device)
+
+        # Voice-encoder speaker embedding for T3 (different from CAMPPlus)
+        ve_embed = torch.from_numpy(self.ve.embeds_from_wavs([ref_16k_wav], sample_rate=S3_SR))
+        ve_embed = ve_embed.mean(axis=0, keepdim=True).to(self.device)
+
+        t3_cond = T3Cond(
+            speaker_emb=ve_embed,
+            cond_prompt_speech_tokens=t3_cond_prompt_tokens,
+            emotion_adv=exaggeration * torch.ones(1, 1, 1),
+        ).to(device=self.device)
+        
+        self.conds = Conditionals(t3_cond, s3gen_ref_dict)
+        print(f"Conditionals prepared using saved voice from {saved_voice_path}")
+
     def generate(
         self,
         text,
@@ -212,14 +274,19 @@ class ChatterboxTTS:
         min_p=0.05,
         top_p=1.0,
         audio_prompt_path=None,
+        saved_voice_path=None,
         exaggeration=0.5,
         cfg_weight=0.5,
         temperature=0.8,
     ):
-        if audio_prompt_path:
+        if saved_voice_path and audio_prompt_path:
+            # Use saved voice embedding with fresh prompt audio for prosody
+            self.prepare_conditionals_with_saved_voice(saved_voice_path, audio_prompt_path, exaggeration=exaggeration)
+        elif audio_prompt_path:
+            # Traditional method: compute everything fresh
             self.prepare_conditionals(audio_prompt_path, exaggeration=exaggeration)
         else:
-            assert self.conds is not None, "Please `prepare_conditionals` first or specify `audio_prompt_path`"
+            assert self.conds is not None, "Please `prepare_conditionals` first, specify `audio_prompt_path`, or provide both `saved_voice_path` and `audio_prompt_path`"
 
         # Update exaggeration if needed
         if exaggeration != self.conds.t3.emotion_adv[0, 0, 0]:
