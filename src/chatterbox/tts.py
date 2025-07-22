@@ -172,6 +172,10 @@ class ChatterboxTTS:
         self.s3gen.save_voice_clone(ref_wav, sr, save_path)
         print(f"Voice clone saved to {save_path}")
 
+    def load_voice_clone(self, path: str):
+        """Load a pre-saved voice embedding"""
+        return self.s3gen.load_voice_clone(path)
+
     @classmethod
     def from_pretrained(cls, device) -> 'ChatterboxTTS':
         # Check if MPS is available on macOS
