@@ -50,3 +50,7 @@ checkpoints/
 # Ignore embedded voices .npy files
 **/*.npy
 
+# Trial scripts
+test_voice_cloning.py
+practical_voice_clone_test.py
+example_tts_with_voice_cloning.py
