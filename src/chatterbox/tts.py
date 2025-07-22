@@ -177,7 +177,40 @@ class ChatterboxTTS:
         import librosa
         ref_wav, sr = librosa.load(audio_file_path, sr=None)
         ref_wav = torch.from_numpy(ref_wav).float()
-        self.s3gen.save_voice_profile(ref_wav, sr, save_path)
+        
+        # Get the full reference dictionary from s3gen
+        ref_dict = self.s3gen.embed_ref(ref_wav, sr, device=self.device)
+        
+        # Also compute voice encoder embedding for T3
+        ref_16k_wav = librosa.resample(ref_wav.numpy(), orig_sr=sr, target_sr=S3_SR)
+        ve_embed = torch.from_numpy(self.ve.embeds_from_wavs([ref_16k_wav], sample_rate=S3_SR))
+        ve_embed = ve_embed.mean(axis=0, keepdim=True).to(self.device)
+        
+        # Create and save the complete voice profile
+        profile = VoiceProfile(
+            embedding=ref_dict["embedding"],  # CAMPPlus embedding for S3Gen
+            prompt_feat=ref_dict["prompt_feat"],
+            prompt_feat_len=ref_dict.get("prompt_feat_len"),
+            prompt_token=ref_dict["prompt_token"],
+            prompt_token_len=ref_dict["prompt_token_len"],
+        )
+        
+        # Add voice encoder embedding to the profile data
+        profile_data = {
+            "embedding": profile.embedding.detach().cpu().numpy(),
+            "ve_embedding": ve_embed.detach().cpu().numpy(),  # Voice encoder embedding for T3
+        }
+        if profile.prompt_feat is not None:
+            profile_data["prompt_feat"] = profile.prompt_feat.detach().cpu().numpy()
+        if profile.prompt_feat_len is not None:
+            profile_data["prompt_feat_len"] = profile.prompt_feat_len
+        if profile.prompt_token is not None:
+            profile_data["prompt_token"] = profile.prompt_token.detach().cpu().numpy()
+        if profile.prompt_token_len is not None:
+            profile_data["prompt_token_len"] = profile.prompt_token_len.detach().cpu().numpy()
+        
+        import numpy as np
+        np.save(save_path, profile_data)
         print(f"✅ Full voice profile saved to {save_path}")
 
     def load_voice_clone(self, path: str):
@@ -185,8 +218,27 @@ class ChatterboxTTS:
         return self.s3gen.load_voice_clone(path)
 
     def load_voice_profile(self, path: str):
-        """Load a complete voice profile"""
-        return self.s3gen.load_voice_profile(path)
+        """Load a complete voice profile with custom format including voice encoder embedding"""
+        import numpy as np
+        data = np.load(path, allow_pickle=True).item()
+        
+        # Create VoiceProfile object
+        profile = VoiceProfile(
+            embedding=torch.tensor(data["embedding"]).to(self.device),
+            prompt_feat=torch.tensor(data["prompt_feat"]).to(self.device) if "prompt_feat" in data else None,
+            prompt_feat_len=data.get("prompt_feat_len"),
+            prompt_token=torch.tensor(data["prompt_token"]).to(self.device) if "prompt_token" in data else None,
+            prompt_token_len=torch.tensor(data["prompt_token_len"]).to(self.device) if "prompt_token_len" in data else None,
+        )
+        
+        # Add voice encoder embedding as an attribute
+        if "ve_embedding" in data:
+            profile.ve_embedding = torch.tensor(data["ve_embedding"]).to(self.device)
+        else:
+            # Fallback for old profiles without voice encoder embedding
+            profile.ve_embedding = None
+            
+        return profile
 
     @classmethod
     def from_pretrained(cls, device) -> 'ChatterboxTTS':
@@ -304,9 +356,12 @@ class ChatterboxTTS:
         else:
             t3_cond_prompt_tokens = None
         
-        # For voice encoder embedding, we can use the CAMPPlus embedding from the profile
-        # as a reasonable approximation for T3 conditioning
-        ve_embed = profile.embedding.to(self.device)
+        # Use the voice encoder embedding from the profile for T3 conditioning
+        if hasattr(profile, 've_embedding') and profile.ve_embedding is not None:
+            ve_embed = profile.ve_embedding.to(self.device)
+        else:
+            # Fallback to random embedding if no voice encoder embedding
+            ve_embed = torch.randn(1, 256).to(self.device)
         
         t3_cond = T3Cond(
             speaker_emb=ve_embed,

@@ -148,7 +148,7 @@ class S3Token2Mel(torch.nn.Module):
         return torch.from_numpy(emb).to(self.device)
 
     @torch.inference_mode()
-    def load_voice_profile(self, profile_path: str) -> VoiceProfile:
+    def load_voice_profile(self, profile_path: str) -> "VoiceProfile":
         """Load a complete voice profile from file"""
         return VoiceProfile.load(profile_path, device=self.device)
 
