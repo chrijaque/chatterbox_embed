@@ -119,9 +119,38 @@ class S3Token2Mel(torch.nn.Module):
         np.save(save_path, embedding.detach().cpu().numpy())
 
     @torch.inference_mode()
+    def save_voice_profile(self, ref_wav: torch.Tensor, ref_sr: int, save_path: str):
+        """Save a complete voice profile including embedding, prompt features, and tokens for more accurate TTS"""
+        if isinstance(ref_wav, np.ndarray):
+            ref_wav = torch.from_numpy(ref_wav).float()
+        if len(ref_wav.shape) == 1:
+            ref_wav = ref_wav.unsqueeze(0)
+
+        device = self.device
+        ref_wav = ref_wav.to(device)
+        
+        # Get the full reference dictionary using embed_ref
+        ref_dict = self.embed_ref(ref_wav, ref_sr, device=device)
+        
+        # Create and save the complete voice profile
+        profile = VoiceProfile(
+            embedding=ref_dict["embedding"],
+            prompt_feat=ref_dict["prompt_feat"],
+            prompt_feat_len=ref_dict.get("prompt_feat_len"),
+            prompt_token=ref_dict["prompt_token"],
+            prompt_token_len=ref_dict["prompt_token_len"],
+        )
+        profile.save(save_path)
+
+    @torch.inference_mode()
     def load_voice_clone(self, embedding_path: str) -> torch.Tensor:
         emb = np.load(embedding_path)
         return torch.from_numpy(emb).to(self.device)
+
+    @torch.inference_mode()
+    def load_voice_profile(self, profile_path: str) -> VoiceProfile:
+        """Load a complete voice profile from file"""
+        return VoiceProfile.load(profile_path, device=self.device)
 
     def embed_ref(
         self,
@@ -314,4 +343,52 @@ class S3Token2Wav(S3Token2Mel):
         # NOTE: ad-hoc method to reduce "spillover" from the reference clip.
         output_wavs[:, :len(self.trim_fade)] *= self.trim_fade
 
+
         return output_wavs, output_sources
+
+
+# ================== VoiceProfile ==================
+class VoiceProfile:
+    """
+    Represents a full voice profile including the speaker embedding and
+    reference audio features for cloning or TTS generation.
+    """
+
+    def __init__(
+        self,
+        embedding: torch.Tensor,
+        prompt_feat: Optional[torch.Tensor] = None,
+        prompt_feat_len: Optional[int] = None,
+        prompt_token: Optional[torch.Tensor] = None,
+        prompt_token_len: Optional[torch.Tensor] = None,
+    ):
+        self.embedding = embedding
+        self.prompt_feat = prompt_feat
+        self.prompt_feat_len = prompt_feat_len
+        self.prompt_token = prompt_token
+        self.prompt_token_len = prompt_token_len
+
+    @classmethod
+    def load(cls, path: str, device: str = "cpu") -> "VoiceProfile":
+        data = np.load(path, allow_pickle=True).item()
+        return cls(
+            embedding=torch.tensor(data["embedding"]).to(device),
+            prompt_feat=torch.tensor(data["prompt_feat"]).to(device) if "prompt_feat" in data else None,
+            prompt_feat_len=data.get("prompt_feat_len"),
+            prompt_token=torch.tensor(data["prompt_token"]).to(device) if "prompt_token" in data else None,
+            prompt_token_len=torch.tensor(data["prompt_token_len"]).to(device) if "prompt_token_len" in data else None,
+        )
+
+    def save(self, path: str):
+        data = {
+            "embedding": self.embedding.cpu().numpy(),
+        }
+        if self.prompt_feat is not None:
+            data["prompt_feat"] = self.prompt_feat.cpu().numpy()
+        if self.prompt_feat_len is not None:
+            data["prompt_feat_len"] = self.prompt_feat_len
+        if self.prompt_token is not None:
+            data["prompt_token"] = self.prompt_token.cpu().numpy()
+        if self.prompt_token_len is not None:
+            data["prompt_token_len"] = self.prompt_token_len.cpu().numpy()
+        np.save(path, data)

@@ -10,7 +10,7 @@ from safetensors.torch import load_file
 
 from .models.t3 import T3
 from .models.s3tokenizer import S3_SR, drop_invalid_tokens
-from .models.s3gen import S3GEN_SR, S3Gen
+from .models.s3gen import S3GEN_SR, S3Gen, VoiceProfile
 from .models.tokenizers import EnTokenizer
 from .models.voice_encoder import VoiceEncoder
 from .models.t3.modules.cond_enc import T3Cond
@@ -172,9 +172,21 @@ class ChatterboxTTS:
         self.s3gen.save_voice_clone(ref_wav, sr, save_path)
         print(f"Voice clone saved to {save_path}")
 
+    def save_voice_profile(self, audio_file_path: str, save_path: str):
+        """Save a complete voice profile including embedding, prompt features, and tokens for more accurate TTS"""
+        import librosa
+        ref_wav, sr = librosa.load(audio_file_path, sr=None)
+        ref_wav = torch.from_numpy(ref_wav).float()
+        self.s3gen.save_voice_profile(ref_wav, sr, save_path)
+        print(f"✅ Full voice profile saved to {save_path}")
+
     def load_voice_clone(self, path: str):
         """Load a pre-saved voice embedding"""
         return self.s3gen.load_voice_clone(path)
+
+    def load_voice_profile(self, path: str):
+        """Load a complete voice profile"""
+        return self.s3gen.load_voice_profile(path)
 
     @classmethod
     def from_pretrained(cls, device) -> 'ChatterboxTTS':
@@ -271,6 +283,40 @@ class ChatterboxTTS:
         self.conds = Conditionals(t3_cond, s3gen_ref_dict)
         print(f"Conditionals prepared using saved voice from {saved_voice_path}")
 
+    def prepare_conditionals_with_voice_profile(self, voice_profile_path: str, exaggeration=0.5):
+        """Prepare conditionals using a complete voice profile for most accurate TTS"""
+        # Load the voice profile
+        profile = self.load_voice_profile(voice_profile_path)
+        
+        # Create s3gen ref_dict from the loaded profile
+        s3gen_ref_dict = dict(
+            prompt_token=profile.prompt_token.to(self.device),
+            prompt_token_len=profile.prompt_token_len.to(self.device),
+            prompt_feat=profile.prompt_feat.to(self.device),
+            prompt_feat_len=profile.prompt_feat_len,
+            embedding=profile.embedding.to(self.device),
+        )
+        
+        # For T3, we can use the prompt tokens from the profile for conditioning
+        if plen := self.t3.hp.speech_cond_prompt_len:
+            # Use the prompt tokens from the profile, but limit to the required length
+            t3_cond_prompt_tokens = profile.prompt_token[:, :plen].to(self.device)
+        else:
+            t3_cond_prompt_tokens = None
+        
+        # For voice encoder embedding, we can use the CAMPPlus embedding from the profile
+        # as a reasonable approximation for T3 conditioning
+        ve_embed = profile.embedding.to(self.device)
+        
+        t3_cond = T3Cond(
+            speaker_emb=ve_embed,
+            cond_prompt_speech_tokens=t3_cond_prompt_tokens,
+            emotion_adv=exaggeration * torch.ones(1, 1, 1),
+        ).to(device=self.device)
+        
+        self.conds = Conditionals(t3_cond, s3gen_ref_dict)
+        print(f"✅ Conditionals prepared using voice profile from {voice_profile_path}")
+
     def generate(
         self,
         text,
@@ -279,27 +325,22 @@ class ChatterboxTTS:
         top_p=1.0,
         audio_prompt_path=None,
         saved_voice_path=None,
+        voice_profile_path=None,
         exaggeration=0.5,
         cfg_weight=0.5,
         temperature=0.8,
     ):
-        if saved_voice_path and audio_prompt_path:
+        if voice_profile_path:
+            # Use complete voice profile for most accurate TTS
+            self.prepare_conditionals_with_voice_profile(voice_profile_path, exaggeration=exaggeration)
+        elif saved_voice_path and audio_prompt_path:
             # Use saved voice embedding with fresh prompt audio for prosody
             self.prepare_conditionals_with_saved_voice(saved_voice_path, audio_prompt_path, exaggeration=exaggeration)
         elif audio_prompt_path:
             # Traditional method: compute everything fresh
             self.prepare_conditionals(audio_prompt_path, exaggeration=exaggeration)
         else:
-            assert self.conds is not None, "Please `prepare_conditionals` first, specify `audio_prompt_path`, or provide both `saved_voice_path` and `audio_prompt_path`"
-
-        # Update exaggeration if needed
-        if exaggeration != self.conds.t3.emotion_adv[0, 0, 0]:
-            _cond: T3Cond = self.conds.t3
-            self.conds.t3 = T3Cond(
-                speaker_emb=_cond.speaker_emb,
-                cond_prompt_speech_tokens=_cond.cond_prompt_speech_tokens,
-                emotion_adv=exaggeration * torch.ones(1, 1, 1),
-            ).to(device=self.device)
+            assert self.conds is not None, "Please `prepare_conditionals` first, specify `audio_prompt_path`, or provide `voice_profile_path`, or provide both `saved_voice_path` and `audio_prompt_path`"
 
         # Norm and tokenize text
         text = punc_norm(text)

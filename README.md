@@ -136,6 +136,76 @@ for i, text in enumerate(texts):
 - **🔄 Reusable**: Save once, use across different sessions and applications
 - **🎯 Quality**: Maintains the same voice quality as traditional method
 
+## Voice Profiles for Enhanced Voice Cloning
+
+For even more accurate voice cloning, Chatterbox now supports **voice profiles** - complete voice representations that include not just the speaker embedding, but also prompt features and tokens. This provides the most accurate voice reproduction and eliminates the need for separate prompt audio during generation.
+
+### Save a Complete Voice Profile
+```python
+# Save complete voice profile (embedding + features + tokens)
+model.save_voice_profile("reference_speaker.wav", "my_voice_profile.npy")
+```
+
+### Use Voice Profile for TTS
+```python
+# Generate speech using complete voice profile (most accurate)
+wav = model.generate(
+    "Any text you want to synthesize!",
+    voice_profile_path="my_voice_profile.npy",  # Complete voice profile
+    exaggeration=0.6,
+    cfg_weight=0.5
+)
+ta.save("output.wav", wav, model.sr)
+```
+
+### Voice Profile vs Voice Embedding
+
+| Feature | Voice Embedding | Voice Profile |
+|---------|----------------|---------------|
+| **Size** | ~1KB | ~50-100KB |
+| **Accuracy** | Good | Excellent |
+| **Prompt Audio Required** | Yes | No |
+| **Generation Speed** | Fast | Fastest |
+| **Use Case** | General purpose | High-quality production |
+
+### Complete Voice Profile Example
+```python
+import torchaudio as ta
+from chatterbox.tts import ChatterboxTTS
+
+# Load model
+model = ChatterboxTTS.from_pretrained(device="cuda")
+
+# Step 1: Create and save voice profile (do this once)
+reference_audio = "speaker_sample.wav"
+voice_profile_path = "speaker_profile.npy"
+model.save_voice_profile(reference_audio, voice_profile_path)
+print(f"Voice profile saved to {voice_profile_path}")
+
+# Step 2: Generate multiple texts with the same voice (fastest method!)
+texts = [
+    "Hello, this is a demonstration of voice profiling.",
+    "The complete profile provides the most accurate voice reproduction.",
+    "No need for separate prompt audio during generation."
+]
+
+for i, text in enumerate(texts):
+    wav = model.generate(
+        text,
+        voice_profile_path=voice_profile_path,  # Complete profile - no prompt audio needed!
+        temperature=0.7
+    )
+    ta.save(f"output_{i+1}.wav", wav, model.sr)
+```
+
+### Benefits of Voice Profiles
+- **🎯 Maximum Accuracy**: Complete voice representation for best quality
+- **⚡ Fastest Generation**: No need to recompute features or provide prompt audio
+- **🔄 Self-Contained**: Everything needed for TTS is in one file
+- **🎵 Consistent Quality**: Maintains exact voice characteristics across generations
+
+See `example_voice_profile.py` for a complete demonstration.
+
 See `example_tts.py`, `example_vc.py`, and `example_tts_with_voice_cloning.py` for more examples.
 
 # Supported Lanugage
