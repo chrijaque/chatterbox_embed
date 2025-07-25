@@ -391,7 +391,23 @@ class S3Token2Wav(S3Token2Mel):
             )
 
         # 1) Text → discrete S3 speech tokens
-        speech_tokens = self.text_encoder.encode(text)
+        # ---------------------------------------------------------
+        # Accept either:
+        #   • an object exposing `.encode(text) -> tensor`
+        #   • a callable that can be invoked directly
+        # ---------------------------------------------------------
+        if hasattr(self.text_encoder, "encode"):
+            speech_tokens = self.text_encoder.encode(text)
+        elif callable(self.text_encoder):
+            speech_tokens = self.text_encoder(text)
+        else:
+            raise RuntimeError(
+                "S3Token2Wav.inference_from_text: `text_encoder` has neither "
+                "an `.encode()` method nor is it callable.  "
+                f"Got type {type(self.text_encoder)} with attrs "
+                f"{dir(self.text_encoder)[:20]} …"
+            )
+
         if not torch.is_tensor(speech_tokens):
             speech_tokens = torch.tensor(speech_tokens, dtype=torch.long)
         speech_tokens = speech_tokens.to(self.device)
