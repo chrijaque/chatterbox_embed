@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Optional
 
 import librosa
 import torch
@@ -80,6 +81,7 @@ class ChatterboxVC:
         s3gen_ref_wav = s3gen_ref_wav[:self.DEC_COND_LEN]
         self.ref_dict = self.s3gen.embed_ref(s3gen_ref_wav, S3GEN_SR, device=self.device)
 
+
     def generate(
         self,
         audio,
@@ -102,3 +104,57 @@ class ChatterboxVC:
             wav = wav.squeeze(0).detach().cpu().numpy()
             watermarked_wav = self.watermarker.apply_watermark(wav, sample_rate=self.sr)
         return torch.from_numpy(watermarked_wav).unsqueeze(0)
+
+    # ------------------------------------------------------------------
+    # NEW: text‑to‑speech with an in‑memory voice profile (no file I/O)
+    # ------------------------------------------------------------------
+    def tts(
+        self,
+        text: str,
+        *,
+        finalize: bool = True,
+    ) -> torch.Tensor:
+        """
+        Synthesise ``text`` directly using the current voice profile
+        (``self.ref_dict``) without any intermediate audio prompt.
+
+        This leverages the new ``S3Token2Wav.inference_from_text`` helper
+        that was patched into *s3gen.py*.
+
+        Parameters
+        ----------
+        text : str
+            The text to speak.
+        finalize : bool, optional
+            Whether this is the final chunk (affects streaming).  Defaults
+            to ``True`` for one‑shot synthesis.
+
+        Returns
+        -------
+        torch.Tensor
+            A (1, samples) waveform tensor at ``self.sr``.
+        """
+        if self.ref_dict is None:
+            raise RuntimeError(
+                "ChatterboxVC.tts(): no voice profile loaded.  "
+                "Call `set_target_voice()` or construct with `ref_dict`."
+            )
+
+        # Ensure the S3Gen model has a text encoder attached.
+        if not hasattr(self.s3gen, "text_encoder"):
+            raise RuntimeError(
+                "ChatterboxVC.tts(): `self.s3gen` has no `text_encoder`.  "
+                "Attach one with `self.s3gen.text_encoder = my_encoder`."
+            )
+
+        with torch.inference_mode():
+            wav = self.s3gen.inference_from_text(
+                text,
+                ref_dict=self.ref_dict,
+                finalize=finalize,
+            )
+            wav_np = wav.cpu().numpy()
+            watermarked = self.watermarker.apply_watermark(
+                wav_np, sample_rate=self.sr
+            )
+        return torch.from_numpy(watermarked).unsqueeze(0)

@@ -347,6 +347,63 @@ class S3Token2Wav(S3Token2Mel):
         return output_wavs, output_sources
 
 
+    # ---------------------------------------------------------------------
+    # NEW ‼️  High‑level helper: raw text  ➜  waveform  (profile‑based)
+    # ---------------------------------------------------------------------
+    @torch.inference_mode()
+    def inference_from_text(
+        self,
+        text: str,
+        ref_dict: dict,
+        *,
+        finalize: bool = True,
+    ) -> torch.Tensor:
+        """
+        Convenience wrapper that lets callers supply **raw text** plus an
+        in-memory voice profile (``ref_dict``) instead of an audio prompt.
+
+        The heavy lifting (text → S3 speech-token IDs) must be performed by
+        a *separate* language model that is attached to this class instance
+        as ``self.text_encoder``.  That object **must** expose
+        ``encode(text: str) -> torch.LongTensor`` compatible with the
+        decoder's vocabulary.
+
+        Example::
+
+            model.text_encoder = cosy_lm          # attaches the encoder
+            wav = model.inference_from_text(
+                    "Hello world!",
+                    ref_dict=profile_dict,
+                 )
+
+        If ``self.text_encoder`` has not been attached, this method raises
+        ``RuntimeError`` so upstream code can fall back to another path.
+
+        Returns
+        -------
+        torch.Tensor
+            A (1, samples) waveform at ``S3GEN_SR`` ready for saving.
+        """
+        if not hasattr(self, "text_encoder"):
+            raise RuntimeError(
+                "S3Token2Wav.inference_from_text: no `text_encoder` attached "
+                "(expected an object with `.encode(text) -> LongTensor`)."
+            )
+
+        # 1) Text → discrete S3 speech tokens
+        speech_tokens = self.text_encoder.encode(text)
+        if not torch.is_tensor(speech_tokens):
+            speech_tokens = torch.tensor(speech_tokens, dtype=torch.long)
+        speech_tokens = speech_tokens.to(self.device)
+
+        # 2) Re‑use the existing token‑level inference path
+        output_wavs, _ = self.inference(
+            speech_tokens=speech_tokens,
+            ref_dict=ref_dict,
+            finalize=finalize,
+        )
+        return output_wavs.squeeze(0)  # (samples,)  – drop batch dim for convenience
+
 # ================== VoiceProfile ==================
 class VoiceProfile:
     """
