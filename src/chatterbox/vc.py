@@ -127,7 +127,7 @@ class ChatterboxVC:
             The text to speak.
         finalize : bool, optional
             Whether this is the final chunk (affects streaming).  Defaults
-            to ``True`` for one‑shot synthesis.
+            to ``True`` for one-shot synthesis.
 
         Returns
         -------
