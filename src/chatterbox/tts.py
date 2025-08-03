@@ -156,6 +156,34 @@ class ChatterboxTTS:
         self.device = device
         self.conds = conds
         self.watermarker = perth.PerthImplicitWatermarker()
+        
+        logger.info(f"✅ ChatterboxTTS initialized successfully")
+        logger.info(f"  - Available methods: {[m for m in dir(self) if not m.startswith('_')]}")
+        
+        # Debug: Check for specific methods
+        expected_methods = [
+            'generate_tts_story',
+            'generate_long_text',
+            'chunk_text',
+            'generate_chunks',
+            'stitch_and_normalize',
+            'cleanup_chunks',
+            '_tensor_to_mp3_bytes',
+            '_upload_to_firebase'
+        ]
+        
+        available_methods = [m for m in dir(self) if not m.startswith('_')]
+        missing_methods = [m for m in expected_methods if m not in available_methods]
+        
+        logger.info(f"🔍 TTS Method Check:")
+        logger.info(f"  - Expected methods: {expected_methods}")
+        logger.info(f"  - Available methods: {available_methods}")
+        logger.info(f"  - Missing methods: {missing_methods}")
+        
+        if missing_methods:
+            logger.error(f"❌ MISSING METHODS: {missing_methods}")
+        else:
+            logger.info(f"✅ All expected methods are available!")
 
     @classmethod
     def from_local(cls, ckpt_dir, device) -> 'ChatterboxTTS':

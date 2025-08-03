@@ -62,6 +62,29 @@ class ChatterboxVC:
         
         logger.info(f"✅ ChatterboxVC initialized successfully")
         logger.info(f"  - Available methods: {[m for m in dir(self) if not m.startswith('_')]}")
+        
+        # Debug: Check for specific methods
+        expected_methods = [
+            'create_voice_clone',
+            'save_voice_profile', 
+            'load_voice_profile',
+            'set_voice_profile',
+            'tensor_to_mp3_bytes',
+            'convert_audio_file_to_mp3'
+        ]
+        
+        available_methods = [m for m in dir(self) if not m.startswith('_')]
+        missing_methods = [m for m in expected_methods if m not in available_methods]
+        
+        logger.info(f"🔍 VC Method Check:")
+        logger.info(f"  - Expected methods: {expected_methods}")
+        logger.info(f"  - Available methods: {available_methods}")
+        logger.info(f"  - Missing methods: {missing_methods}")
+        
+        if missing_methods:
+            logger.error(f"❌ MISSING METHODS: {missing_methods}")
+        else:
+            logger.info(f"✅ All expected methods are available!")
 
     @classmethod
     def from_local(cls, ckpt_dir, device) -> 'ChatterboxVC':
