@@ -206,6 +206,215 @@ for i, text in enumerate(texts):
 
 See `example_voice_profile.py` for a complete demonstration.
 
+## Long Text TTS with Chunking and Stitching
+
+For processing very long texts (stories, articles, etc.), Chatterbox now supports automatic text chunking and audio stitching. This feature intelligently splits long text into manageable chunks, generates audio for each chunk, and then stitches them back together with natural pauses.
+
+### Basic Long Text Generation
+```python
+import torchaudio as ta
+from chatterbox.tts import ChatterboxTTS
+
+# Load model
+model = ChatterboxTTS.from_pretrained(device="cuda")
+
+# Long text (e.g., a story or article)
+long_text = """
+Once upon a time, in a land far, far away, there lived a wise old wizard named Merlin. 
+He had spent his entire life studying the ancient arts of magic and had become one of the 
+most powerful sorcerers in the realm. His knowledge was vast, spanning from the simplest 
+spells to the most complex enchantments that could change the very fabric of reality.
+
+Merlin lived in a magnificent tower that reached high into the clouds, where he could 
+observe the stars and planets to better understand the cosmic forces that governed magic. 
+The tower was filled with countless books, scrolls, and magical artifacts that he had 
+collected throughout his many years of travel and study.
+"""
+
+# Generate long text with chunking and stitching
+audio_tensor, sample_rate, metadata = model.generate_long_text(
+    text=long_text,
+    voice_profile_path="my_voice_profile.npy",
+    output_path="long_story.wav",
+    max_chars=500,      # Maximum characters per chunk
+    pause_ms=150,        # Pause between chunks in milliseconds
+    temperature=0.8,     # Generation temperature
+    exaggeration=0.5,    # Voice exaggeration
+    cfg_weight=0.5       # CFG weight
+)
+
+print(f"Generated {metadata['chunk_count']} chunks")
+print(f"Total duration: {metadata['duration_sec']:.2f} seconds")
+```
+
+### Advanced Long Text Processing
+```python
+# Customize chunking and stitching parameters
+audio_tensor, sample_rate, metadata = model.generate_long_text(
+    text=very_long_text,
+    voice_profile_path="voice_profile.npy",
+    output_path="output.wav",
+    max_chars=300,       # Smaller chunks for better memory management
+    pause_ms=200,        # Longer pauses between chunks
+    temperature=0.7,     # Lower temperature for more consistent voice
+    exaggeration=0.6,    # Slightly more expressive
+    cfg_weight=0.4       # Lower CFG for more natural pacing
+)
+```
+
+### Chunking and Stitching Features
+
+- **📝 Intelligent Text Chunking**: Uses NLTK sentence tokenization (with fallback) to split text at natural sentence boundaries
+- **🎵 Audio Stitching**: Combines audio chunks with configurable pauses between segments
+- **🔧 Audio Normalization**: Professional audio processing with pydub (fallback to torchaudio)
+- **🔄 Retry Logic**: Automatic retry mechanism for failed chunks with GPU cache clearing
+- **🧹 Cleanup**: Automatic cleanup of temporary files
+- **📊 Detailed Metadata**: Returns comprehensive information about the generation process
+
+### Chunking Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `max_chars` | 500 | Maximum characters per chunk |
+| `pause_ms` | 100 | Milliseconds of silence between chunks |
+| `temperature` | 0.8 | Generation temperature (0.0-1.0) |
+| `exaggeration` | 0.5 | Voice exaggeration factor |
+| `cfg_weight` | 0.5 | CFG weight for generation |
+
+### Benefits of Long Text TTS
+
+- **📚 Handle Long Content**: Process stories, articles, and other long-form content
+- **💾 Memory Efficient**: Processes text in manageable chunks
+- **🎯 Consistent Quality**: Maintains voice consistency across long texts
+- **⚡ Robust Processing**: Automatic retry logic and error handling
+- **🎵 Professional Audio**: High-quality audio stitching and normalization
+
+See `example_long_text_tts.py` for a complete demonstration.
+
+## Voice Cloning with ChatterboxVC
+
+ChatterboxVC provides comprehensive voice cloning capabilities, including voice profile management, audio processing, and complete voice cloning pipelines. This functionality was previously only available in API applications but is now integrated into the core library.
+
+### Basic Voice Cloning
+```python
+import torch
+from chatterbox.vc import ChatterboxVC
+from chatterbox.tts import ChatterboxTTS
+
+# Initialize models
+tts_model = ChatterboxTTS.from_pretrained(device="cuda")
+vc_model = ChatterboxVC(
+    s3gen=tts_model.s3gen,
+    device=tts_model.device
+)
+
+# Attach text encoder for TTS functionality
+if hasattr(tts_model, "t3"):
+    vc_model.s3gen.text_encoder = tts_model.t3
+
+# Create a voice clone from reference audio
+result = vc_model.create_voice_clone(
+    audio_file_path="reference_audio.wav",
+    voice_id="my_voice",
+    output_dir="./voice_clones"
+)
+
+if result["status"] == "success":
+    print(f"Voice clone created: {result['voice_id']}")
+    print(f"Profile saved to: {result['profile_path']}")
+```
+
+### Voice Profile Management
+```python
+# Save a voice profile
+vc_model.save_voice_profile("reference_audio.wav", "voice_profile.npy")
+
+# Load and use a voice profile
+vc_model.set_voice_profile("voice_profile.npy")
+
+# Generate TTS with the voice profile
+audio_tensor = vc_model.tts("Hello, this is voice cloning!")
+```
+
+### Audio Processing Utilities
+```python
+# Convert audio tensor to MP3 bytes
+mp3_bytes = vc_model.tensor_to_mp3_bytes(audio_tensor, sample_rate=24000, bitrate="96k")
+
+# Convert audio file to MP3
+vc_model.convert_audio_file_to_mp3("input.wav", "output.mp3", bitrate="160k")
+
+# Generate voice sample from profile
+audio_tensor, mp3_bytes = vc_model.generate_voice_sample(
+    voice_profile_path="voice_profile.npy",
+    text="Custom voice sample text"
+)
+```
+
+### Complete Voice Cloning Pipeline
+```python
+# Complete voice cloning with all outputs
+result = vc_model.create_voice_clone(
+    audio_file_path="reference_audio.wav",
+    voice_id="unique_voice_id",
+    output_dir="./outputs"
+)
+
+# Access all generated data
+profile_path = result["profile_path"]
+sample_audio_bytes = result["sample_audio_bytes"]
+recorded_audio_bytes = result["recorded_audio_bytes"]
+
+# Save outputs
+with open("sample.mp3", "wb") as f:
+    f.write(sample_audio_bytes)
+
+with open("recorded.mp3", "wb") as f:
+    f.write(recorded_audio_bytes)
+```
+
+### Voice Conversion (Voice Cloning)
+```python
+# Convert audio to target voice
+converted_audio = vc_model.generate(
+    audio="source_audio.wav",
+    target_voice_path="reference_voice.wav"
+)
+
+# Save converted audio
+import torchaudio
+torchaudio.save("converted.wav", converted_audio, vc_model.sr)
+```
+
+### Voice Cloning Features
+
+- **🎤 Complete Voice Cloning**: Create voice profiles from reference audio
+- **💾 Profile Management**: Save and load voice profiles for reuse
+- **🎵 Audio Processing**: Convert between audio formats (WAV, MP3)
+- **📝 TTS Integration**: Generate speech using voice profiles
+- **🔄 Voice Conversion**: Convert audio to target voices
+- **📊 Comprehensive Metadata**: Detailed information about all operations
+
+### Voice Cloning Parameters
+
+| Parameter | Description |
+|-----------|-------------|
+| `audio_file_path` | Path to reference audio file |
+| `voice_id` | Unique identifier for the voice |
+| `output_dir` | Directory to save outputs |
+| `bitrate` | MP3 bitrate for audio conversion |
+| `text` | Custom text for voice samples |
+
+### Benefits of Voice Cloning
+
+- **🎯 High Quality**: Professional voice cloning with accurate voice reproduction
+- **⚡ Fast Processing**: Efficient voice profile creation and reuse
+- **🔄 Reusable**: Save voice profiles once, use multiple times
+- **🎵 Multiple Formats**: Support for WAV and MP3 audio formats
+- **📊 Detailed Output**: Comprehensive metadata and multiple output formats
+
+See `example_voice_cloning.py` for a complete demonstration.
+
 See `example_tts.py`, `example_vc.py`, and `example_tts_with_voice_cloning.py` for more examples.
 
 # Supported Lanugage

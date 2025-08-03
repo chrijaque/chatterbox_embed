@@ -1,5 +1,9 @@
 from dataclasses import dataclass
 from pathlib import Path
+import os
+import tempfile
+import logging
+from typing import List, Optional, Tuple, Dict
 
 import librosa
 import torch
@@ -7,6 +11,7 @@ import perth
 import torch.nn.functional as F
 from huggingface_hub import hf_hub_download
 from safetensors.torch import load_file
+import torchaudio
 
 from .models.t3 import T3
 from .models.s3tokenizer import S3_SR, drop_invalid_tokens
@@ -15,6 +20,33 @@ from .models.tokenizers import EnTokenizer
 from .models.voice_encoder import VoiceEncoder
 from .models.t3.modules.cond_enc import T3Cond
 
+# Configure logging
+logger = logging.getLogger(__name__)
+
+# Try to import optional dependencies
+try:
+    import nltk
+    from nltk.tokenize.punkt import PunktSentenceTokenizer
+    # Force download and setup NLTK punkt tokenizer
+    try:
+        nltk.download('punkt', quiet=True)
+        nltk.data.find('tokenizers/punkt')
+        NLTK_AVAILABLE = True
+        logger.info("✅ NLTK punkt tokenizer available")
+    except Exception as e:
+        logger.warning(f"⚠️ NLTK setup failed: {e}")
+        NLTK_AVAILABLE = False
+except ImportError:
+    NLTK_AVAILABLE = False
+    logger.warning("⚠️ nltk not available - will use simple text splitting")
+
+try:
+    from pydub import AudioSegment, effects
+    PYDUB_AVAILABLE = True
+    logger.info("✅ pydub available for audio processing")
+except ImportError:
+    PYDUB_AVAILABLE = False
+    logger.warning("⚠️ pydub not available - will use torchaudio for audio processing")
 
 REPO_ID = "ResembleAI/chatterbox"
 
@@ -437,3 +469,254 @@ class ChatterboxTTS:
             wav = wav.squeeze(0).detach().cpu().numpy()
             watermarked_wav = self.watermarker.apply_watermark(wav, sample_rate=self.sr)
         return torch.from_numpy(watermarked_wav).unsqueeze(0)
+
+    def chunk_text(self, text: str, max_chars: int = 500) -> List[str]:
+        """
+        Splits input text into sentence-aligned chunks based on max character count.
+
+        :param text: Full story text
+        :param max_chars: Maximum number of characters per chunk
+        :return: List of text chunks
+        """
+        if NLTK_AVAILABLE:
+            try:
+                # Use NLTK for proper sentence tokenization
+                logger.info("📝 Using NLTK sentence tokenization")
+                tokenizer = PunktSentenceTokenizer()
+                sentences = tokenizer.tokenize(text)
+                logger.info(f"📝 NLTK tokenization successful: {len(sentences)} sentences")
+            except Exception as e:
+                logger.warning(f"⚠️ NLTK tokenization failed: {e} - using fallback")
+                sentences = self._simple_sentence_split(text)
+        else:
+            # Fallback to simple sentence splitting
+            logger.info("📝 Using fallback sentence splitting (NLTK not available)")
+            sentences = self._simple_sentence_split(text)
+
+        chunks, current = [], ""
+        for sent in sentences:
+            if len(current) + len(sent) + 1 <= max_chars:
+                current += (" " + sent).strip()
+            else:
+                if current.strip():
+                    chunks.append(current.strip())
+                current = sent
+        if current.strip():
+            chunks.append(current.strip())
+
+        logger.info(f"📦 Text chunking: {len(sentences)} sentences → {len(chunks)} chunks")
+        return chunks
+    
+    def _simple_sentence_split(self, text: str) -> List[str]:
+        """
+        Simple sentence splitting fallback when NLTK is not available.
+        
+        :param text: Text to split into sentences
+        :return: List of sentences
+        """
+        # Clean up the text
+        text = text.replace('\n', ' ').replace('\r', ' ')
+        
+        # Split on sentence endings
+        sentence_endings = ['.', '!', '?']
+        sentences = []
+        current = ""
+        
+        for char in text:
+            current += char
+            if char in sentence_endings:
+                sentence = current.strip()
+                if sentence:
+                    sentences.append(sentence)
+                current = ""
+        
+        # Add any remaining text
+        if current.strip():
+            sentences.append(current.strip())
+        
+        # Filter out empty sentences
+        sentences = [s for s in sentences if s.strip()]
+        
+        return sentences
+
+    def generate_chunks(self, chunks: List[str], voice_profile_path: str, temperature: float = 0.8, 
+                       exaggeration: float = 0.5, cfg_weight: float = 0.5) -> List[str]:
+        """
+        Generates speech from each text chunk and stores temporary WAV files.
+
+        :param chunks: List of text chunks
+        :param voice_profile_path: Path to the voice profile (.npy)
+        :param temperature: Generation temperature
+        :param exaggeration: Voice exaggeration factor
+        :param cfg_weight: CFG weight for generation
+        :return: List of file paths to temporary WAV files
+        """
+        wav_paths = []
+        
+        for i, chunk in enumerate(chunks):
+            logger.info(f"🔄 Generating chunk {i+1}/{len(chunks)} ({len(chunk)} chars)...")
+            
+            # Retry logic for each chunk
+            chunk_success = False
+            retry_count = 0
+            max_retries = 2  # 2 retries = 3 total attempts
+            
+            while not chunk_success and retry_count <= max_retries:
+                try:
+                    # Clear GPU cache before each attempt
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    
+                    # Generate audio tensor using the voice profile
+                    audio_tensor = self.generate(
+                        text=chunk,
+                        voice_profile_path=voice_profile_path,
+                        temperature=temperature,
+                        exaggeration=exaggeration,
+                        cfg_weight=cfg_weight
+                    )
+                    
+                    # Save to temporary file
+                    temp_wav = tempfile.NamedTemporaryFile(suffix=f"_chunk_{i}.wav", delete=False)
+                    torchaudio.save(temp_wav.name, audio_tensor, self.sr)
+                    wav_paths.append(temp_wav.name)
+                    
+                    logger.info(f"✅ Chunk {i+1} generated | Shape: {audio_tensor.shape}")
+                    chunk_success = True
+                    
+                except Exception as e:
+                    retry_count += 1
+                    if retry_count <= max_retries:
+                        logger.warning(f"⚠️ Chunk {i+1} failed (attempt {retry_count}/{max_retries + 1}): {e}")
+                        logger.info(f"🔄 Retrying chunk {i+1}...")
+                    else:
+                        # Final failure - stop processing
+                        logger.error(f"❌ Chunk {i+1} failed after {max_retries + 1} attempts: {e}")
+                        logger.error(f"❌ Stopping TTS processing due to chunk failure")
+                        
+                        # Clean up any successfully generated chunks
+                        self.cleanup_chunks(wav_paths)
+                        
+                        # Raise exception to stop processing
+                        raise RuntimeError(f"Chunk {i+1} failed after {max_retries + 1} attempts: {e}")
+        
+        return wav_paths
+
+    def stitch_and_normalize(self, wav_paths: List[str], output_path: str, pause_ms: int = 100) -> Tuple[torch.Tensor, int, float]:
+        """
+        Stitches WAV chunks together with pause and normalizes audio levels.
+
+        :param wav_paths: List of temporary WAV file paths
+        :param output_path: Final path to export the combined WAV file
+        :param pause_ms: Milliseconds of silence between chunks
+        :return: Tuple of (audio_tensor, sample_rate, duration_seconds)
+        """
+        logger.info(f"🔍 stitch_and_normalize called with output_path: {output_path}")
+        
+        if PYDUB_AVAILABLE:
+            # Use pydub for professional audio processing
+            logger.info(f"🔍 Using pydub for audio processing")
+            final = AudioSegment.empty()
+            for p in wav_paths:
+                seg = AudioSegment.from_wav(p)
+                final += seg + AudioSegment.silent(pause_ms)
+            normalized = effects.normalize(final)
+            logger.info(f"🔍 About to export to: {output_path}")
+            normalized.export(output_path, format="wav")
+            logger.info(f"🔍 Export completed. File exists: {Path(output_path).exists()}")
+            
+            # Load the saved file to get the tensor
+            audio_tensor, sample_rate = torchaudio.load(output_path)
+            duration = len(normalized) / 1000.0  # Convert ms to seconds
+            logger.info(f"🔍 Loaded audio tensor shape: {audio_tensor.shape}")
+            return audio_tensor, sample_rate, duration
+        else:
+            # Fallback to torchaudio concatenation
+            audio_chunks = []
+            sample_rate = None
+            for wav_path in wav_paths:
+                audio_tensor, sr = torchaudio.load(wav_path)
+                if sample_rate is None:
+                    sample_rate = sr
+                audio_chunks.append(audio_tensor)
+                
+                # Add silence between chunks
+                silence_duration = int(pause_ms * sample_rate / 1000)
+                silence = torch.zeros(1, silence_duration)
+                audio_chunks.append(silence)
+            
+            # Concatenate all chunks
+            if audio_chunks:
+                final_audio = torch.cat(audio_chunks, dim=-1)
+                torchaudio.save(output_path, final_audio, sample_rate)
+                duration = final_audio.shape[-1] / sample_rate
+                return final_audio, sample_rate, duration
+            else:
+                raise RuntimeError("No audio chunks to concatenate")
+
+    def cleanup_chunks(self, wav_paths: List[str]):
+        """
+        Deletes temporary WAV files to clean up disk space.
+
+        :param wav_paths: List of paths to temporary WAV files
+        """
+        for path in wav_paths:
+            try:
+                os.remove(path)
+                logger.debug(f"🧹 Cleaned up temporary file: {path}")
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to delete {path} — {e}")
+
+    def generate_long_text(self, text: str, voice_profile_path: str, output_path: str, 
+                          max_chars: int = 500, pause_ms: int = 100, temperature: float = 0.8,
+                          exaggeration: float = 0.5, cfg_weight: float = 0.5) -> Tuple[torch.Tensor, int, Dict]:
+        """
+        Full TTS pipeline for long texts: chunk → generate → stitch → clean.
+
+        :param text: Input text to synthesize
+        :param voice_profile_path: Path to the voice profile (.npy)
+        :param output_path: Path to save the final audio file
+        :param max_chars: Maximum number of characters per chunk
+        :param pause_ms: Milliseconds of silence between chunks
+        :param temperature: Generation temperature
+        :param exaggeration: Voice exaggeration factor
+        :param cfg_weight: CFG weight for generation
+        :return: Tuple of (audio_tensor, sample_rate, metadata_dict)
+        """
+        logger.info(f"🎵 Starting TTS processing for {len(text)} characters")
+        logger.info(f"🔍 Output path: {output_path}")
+        
+        # Safety check for extremely long texts
+        if len(text) > 13000:
+            logger.warning(f"⚠️ Very long text ({len(text)} chars) - truncating to safe length")
+            text = text[:13000] + "... [truncated]"
+            logger.info(f"📝 Truncated text to {len(text)} characters")
+        
+        chunks = self.chunk_text(text, max_chars)
+        logger.info(f"📦 Split into {len(chunks)} chunks")
+        
+        wav_paths = self.generate_chunks(chunks, voice_profile_path, temperature, exaggeration, cfg_weight)
+        if not wav_paths:
+            raise RuntimeError("Failed to generate any audio chunks")
+        
+        logger.info(f"🔗 Stitching {len(wav_paths)} audio chunks...")
+        audio_tensor, sample_rate, total_duration = self.stitch_and_normalize(wav_paths, output_path, pause_ms)
+        
+        self.cleanup_chunks(wav_paths)
+        
+        logger.info(f"✅ TTS processing completed | Duration: {total_duration:.2f}s")
+        logger.info(f"🔍 Final output path: {output_path}")
+        logger.info(f"🔍 Output file exists: {Path(output_path).exists()}")
+        
+        metadata = {
+            "chunk_count": len(chunks),
+            "output_path": output_path,
+            "duration_sec": total_duration,
+            "successful_chunks": len(wav_paths),
+            "sample_rate": sample_rate,
+            "text_length": len(text),
+            "max_chars_per_chunk": max_chars,
+            "pause_ms": pause_ms
+        }
+        
+        return audio_tensor, sample_rate, metadata

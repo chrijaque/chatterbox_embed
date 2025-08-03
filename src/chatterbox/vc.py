@@ -1,15 +1,31 @@
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict, Tuple, List
+import os
+import tempfile
+import logging
+import numpy as np
 
 import librosa
 import torch
 import perth
+import torchaudio
 from huggingface_hub import hf_hub_download
 from safetensors.torch import load_file
 
 from .models.s3tokenizer import S3_SR
-from .models.s3gen import S3GEN_SR, S3Gen
+from .models.s3gen import S3GEN_SR, S3Gen, VoiceProfile
 
+# Configure logging
+logger = logging.getLogger(__name__)
+
+# Try to import optional dependencies
+try:
+    from pydub import AudioSegment
+    PYDUB_AVAILABLE = True
+    logger.info("✅ pydub available for audio processing")
+except ImportError:
+    PYDUB_AVAILABLE = False
+    logger.warning("⚠️ pydub not available - will use torchaudio for audio processing")
 
 REPO_ID = "ResembleAI/chatterbox"
 
@@ -158,3 +174,318 @@ class ChatterboxVC:
                 wav_np, sample_rate=self.sr
             )
         return torch.from_numpy(watermarked).unsqueeze(0)
+
+    # ------------------------------------------------------------------
+    # Voice Profile Management
+    # ------------------------------------------------------------------
+    def save_voice_profile(self, audio_file_path: str, save_path: str):
+        """
+        Save a complete voice profile including embedding, prompt features, and tokens.
+        
+        :param audio_file_path: Path to the reference audio file
+        :param save_path: Path to save the voice profile (.npy)
+        """
+        logger.info(f"💾 Saving voice profile from {audio_file_path} to {save_path}")
+        
+        try:
+            # Load reference audio
+            ref_wav, sr = librosa.load(audio_file_path, sr=None)
+            ref_wav = torch.from_numpy(ref_wav).float()
+            
+            # Get the full reference dictionary from s3gen
+            ref_dict = self.s3gen.embed_ref(ref_wav, sr, device=self.device)
+            
+            # Create and save the complete voice profile
+            profile = VoiceProfile(
+                embedding=ref_dict["embedding"],
+                prompt_feat=ref_dict["prompt_feat"],
+                prompt_feat_len=ref_dict.get("prompt_feat_len"),
+                prompt_token=ref_dict["prompt_token"],
+                prompt_token_len=ref_dict["prompt_token_len"],
+            )
+            
+            # Convert to numpy format for saving
+            profile_data = {
+                "embedding": profile.embedding.detach().cpu().numpy(),
+            }
+            if profile.prompt_feat is not None:
+                profile_data["prompt_feat"] = profile.prompt_feat.detach().cpu().numpy()
+            if profile.prompt_feat_len is not None:
+                profile_data["prompt_feat_len"] = profile.prompt_feat_len
+            if profile.prompt_token is not None:
+                profile_data["prompt_token"] = profile.prompt_token.detach().cpu().numpy()
+            if profile.prompt_token_len is not None:
+                profile_data["prompt_token_len"] = profile.prompt_token_len.detach().cpu().numpy()
+            
+            # Save profile
+            np.save(save_path, profile_data)
+            logger.info(f"✅ Voice profile saved to {save_path}")
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to save voice profile: {e}")
+            raise
+
+    def load_voice_profile(self, path: str):
+        """
+        Load a complete voice profile with custom format.
+        
+        :param path: Path to the voice profile (.npy)
+        :return: VoiceProfile object
+        """
+        logger.info(f"📂 Loading voice profile from {path}")
+        
+        try:
+            data = np.load(path, allow_pickle=True).item()
+            
+            # Create VoiceProfile object
+            profile = VoiceProfile(
+                embedding=torch.tensor(data["embedding"]).to(self.device),
+                prompt_feat=torch.tensor(data["prompt_feat"]).to(self.device) if "prompt_feat" in data else None,
+                prompt_feat_len=data.get("prompt_feat_len"),
+                prompt_token=torch.tensor(data["prompt_token"]).to(self.device) if "prompt_token" in data else None,
+                prompt_token_len=torch.tensor(data["prompt_token_len"]).to(self.device) if "prompt_token_len" in data else None,
+            )
+            
+            logger.info(f"✅ Voice profile loaded from {path}")
+            return profile
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to load voice profile: {e}")
+            raise
+
+    def set_voice_profile(self, voice_profile_path: str):
+        """
+        Set the voice profile from a saved file and update the internal ref_dict.
+        
+        :param voice_profile_path: Path to the voice profile (.npy)
+        """
+        logger.info(f"🎯 Setting voice profile from {voice_profile_path}")
+        
+        try:
+            # Load the voice profile
+            profile = self.load_voice_profile(voice_profile_path)
+            
+            # Create ref_dict from the loaded profile
+            self.ref_dict = {
+                "prompt_token": profile.prompt_token.to(self.device),
+                "prompt_token_len": profile.prompt_token_len.to(self.device),
+                "prompt_feat": profile.prompt_feat.to(self.device),
+                "prompt_feat_len": profile.prompt_feat_len,
+                "embedding": profile.embedding.to(self.device),
+            }
+            
+            logger.info(f"✅ Voice profile set successfully")
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to set voice profile: {e}")
+            raise
+
+    # ------------------------------------------------------------------
+    # Audio Processing Utilities
+    # ------------------------------------------------------------------
+    def tensor_to_mp3_bytes(self, audio_tensor: torch.Tensor, sample_rate: int, bitrate: str = "96k") -> bytes:
+        """
+        Convert audio tensor directly to MP3 bytes.
+        
+        :param audio_tensor: PyTorch audio tensor
+        :param sample_rate: Audio sample rate
+        :param bitrate: MP3 bitrate (e.g., "96k", "128k", "160k")
+        :return: MP3 bytes
+        """
+        if PYDUB_AVAILABLE:
+            try:
+                # Convert tensor to AudioSegment
+                audio_segment = self._tensor_to_audiosegment(audio_tensor, sample_rate)
+                # Export to MP3 bytes
+                mp3_file = audio_segment.export(format="mp3", bitrate=bitrate)
+                # Read the bytes from the file object
+                mp3_bytes = mp3_file.read()
+                return mp3_bytes
+            except Exception as e:
+                logger.warning(f"Direct MP3 conversion failed: {e}, falling back to WAV")
+                return self._tensor_to_wav_bytes(audio_tensor, sample_rate)
+        else:
+            logger.warning("pydub not available, falling back to WAV")
+            return self._tensor_to_wav_bytes(audio_tensor, sample_rate)
+
+    def _tensor_to_audiosegment(self, audio_tensor: torch.Tensor, sample_rate: int):
+        """
+        Convert PyTorch audio tensor to pydub AudioSegment.
+        
+        :param audio_tensor: PyTorch audio tensor
+        :param sample_rate: Audio sample rate
+        :return: pydub AudioSegment
+        """
+        if not PYDUB_AVAILABLE:
+            raise ImportError("pydub is required for audio conversion")
+        
+        # Convert tensor to numpy array
+        if audio_tensor.dim() == 2:
+            # Stereo: (channels, samples)
+            audio_np = audio_tensor.numpy()
+        else:
+            # Mono: (samples,) -> (1, samples)
+            audio_np = audio_tensor.unsqueeze(0).numpy()
+        
+        # Convert to int16 for pydub
+        audio_np = (audio_np * 32767).astype(np.int16)
+        
+        # Create AudioSegment
+        audio_segment = AudioSegment(
+            audio_np.tobytes(),
+            frame_rate=sample_rate,
+            sample_width=2,  # 16-bit
+            channels=audio_np.shape[0]
+        )
+        
+        return audio_segment
+
+    def _tensor_to_wav_bytes(self, audio_tensor: torch.Tensor, sample_rate: int) -> bytes:
+        """
+        Convert audio tensor to WAV bytes (fallback).
+        
+        :param audio_tensor: PyTorch audio tensor
+        :param sample_rate: Audio sample rate
+        :return: WAV bytes
+        """
+        # Save to temporary WAV file
+        temp_wav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        torchaudio.save(temp_wav.name, audio_tensor, sample_rate)
+        
+        # Read WAV bytes
+        with open(temp_wav.name, 'rb') as f:
+            wav_bytes = f.read()
+        
+        # Clean up temp file
+        os.unlink(temp_wav.name)
+        
+        return wav_bytes
+
+    def convert_audio_file_to_mp3(self, input_path: str, output_path: str, bitrate: str = "160k"):
+        """
+        Convert audio file to MP3 with specified bitrate.
+        
+        :param input_path: Path to input audio file
+        :param output_path: Path to output MP3 file
+        :param bitrate: MP3 bitrate
+        """
+        if not PYDUB_AVAILABLE:
+            raise ImportError("pydub is required for audio conversion")
+        
+        try:
+            # Load audio file
+            audio = AudioSegment.from_file(input_path)
+            # Export as MP3
+            audio.export(output_path, format="mp3", bitrate=bitrate)
+            logger.info(f"✅ Converted {input_path} to MP3: {output_path}")
+        except Exception as e:
+            logger.error(f"❌ Failed to convert {input_path} to MP3: {e}")
+            raise
+
+    # ------------------------------------------------------------------
+    # Voice Cloning Pipeline
+    # ------------------------------------------------------------------
+    def create_voice_clone(self, audio_file_path: str, voice_id: str, output_dir: str = None) -> Dict:
+        """
+        Complete voice cloning pipeline: create profile, generate sample, and return metadata.
+        
+        :param audio_file_path: Path to the reference audio file
+        :param voice_id: Unique identifier for the voice
+        :param output_dir: Directory to save outputs (optional)
+        :return: Dictionary with voice clone information
+        """
+        logger.info(f"🎤 Starting voice clone creation for {voice_id}")
+        
+        try:
+            # Step 1: Create voice profile
+            if output_dir:
+                profile_path = Path(output_dir) / f"{voice_id}.npy"
+            else:
+                profile_path = Path(f"{voice_id}.npy")
+            
+            self.save_voice_profile(audio_file_path, str(profile_path))
+            
+            # Step 2: Generate voice sample
+            template_message = f"Hello, this is the voice clone of {voice_id}. This voice is used to narrate whimsical stories and fairytales."
+            
+            # Set the voice profile for generation
+            self.set_voice_profile(str(profile_path))
+            
+            # Generate sample audio
+            audio_tensor = self.tts(template_message)
+            
+            # Convert to MP3 bytes
+            sample_mp3_bytes = self.tensor_to_mp3_bytes(audio_tensor, self.sr, "96k")
+            
+            # Step 3: Convert original audio to MP3
+            if output_dir:
+                recorded_mp3_path = Path(output_dir) / f"{voice_id}_recorded.mp3"
+            else:
+                recorded_mp3_path = Path(f"{voice_id}_recorded.mp3")
+            
+            self.convert_audio_file_to_mp3(audio_file_path, str(recorded_mp3_path), "160k")
+            
+            # Read recorded MP3 bytes
+            with open(recorded_mp3_path, 'rb') as f:
+                recorded_mp3_bytes = f.read()
+            
+            # Clean up temporary MP3 file
+            if recorded_mp3_path.exists():
+                os.unlink(recorded_mp3_path)
+            
+            # Return comprehensive metadata
+            result = {
+                "voice_id": voice_id,
+                "profile_path": str(profile_path),
+                "profile_exists": profile_path.exists(),
+                "sample_audio_bytes": sample_mp3_bytes,
+                "recorded_audio_bytes": recorded_mp3_bytes,
+                "sample_audio_size": len(sample_mp3_bytes),
+                "recorded_audio_size": len(recorded_mp3_bytes),
+                "audio_tensor_shape": list(audio_tensor.shape),
+                "sample_rate": self.sr,
+                "template_message": template_message,
+                "status": "success"
+            }
+            
+            logger.info(f"✅ Voice clone created successfully for {voice_id}")
+            return result
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to create voice clone: {e}")
+            return {
+                "voice_id": voice_id,
+                "status": "error",
+                "error": str(e)
+            }
+
+    def generate_voice_sample(self, voice_profile_path: str, text: str = None) -> Tuple[torch.Tensor, bytes]:
+        """
+        Generate a voice sample using a saved voice profile.
+        
+        :param voice_profile_path: Path to the voice profile (.npy)
+        :param text: Text to synthesize (optional, uses default if not provided)
+        :return: Tuple of (audio_tensor, mp3_bytes)
+        """
+        logger.info(f"🎵 Generating voice sample from {voice_profile_path}")
+        
+        try:
+            # Set the voice profile
+            self.set_voice_profile(voice_profile_path)
+            
+            # Use provided text or default template
+            if text is None:
+                text = "Hello, this is a demonstration of voice cloning with Chatterbox."
+            
+            # Generate audio
+            audio_tensor = self.tts(text)
+            
+            # Convert to MP3 bytes
+            mp3_bytes = self.tensor_to_mp3_bytes(audio_tensor, self.sr, "96k")
+            
+            logger.info(f"✅ Voice sample generated successfully")
+            return audio_tensor, mp3_bytes
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to generate voice sample: {e}")
+            raise
