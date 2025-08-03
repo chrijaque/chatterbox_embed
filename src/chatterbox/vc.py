@@ -40,55 +40,90 @@ class ChatterboxVC:
         device: str,
         ref_dict: dict=None,
     ):
+        logger.info(f"🔧 ChatterboxVC.__init__ called")
+        logger.info(f"  - s3gen type: {type(s3gen)}")
+        logger.info(f"  - device: {device}")
+        logger.info(f"  - ref_dict: {ref_dict is not None}")
+        
         self.sr = S3GEN_SR
         self.s3gen = s3gen
         self.device = device
         self.watermarker = perth.PerthImplicitWatermarker()
+        
         if ref_dict is None:
             self.ref_dict = None
+            logger.info(f"  - ref_dict set to None")
         else:
             self.ref_dict = {
                 k: v.to(device) if torch.is_tensor(v) else v
                 for k, v in ref_dict.items()
             }
+            logger.info(f"  - ref_dict set with {len(self.ref_dict)} keys")
+        
+        logger.info(f"✅ ChatterboxVC initialized successfully")
+        logger.info(f"  - Available methods: {[m for m in dir(self) if not m.startswith('_')]}")
 
     @classmethod
     def from_local(cls, ckpt_dir, device) -> 'ChatterboxVC':
+        logger.info(f"🔧 ChatterboxVC.from_local called")
+        logger.info(f"  - ckpt_dir: {ckpt_dir}")
+        logger.info(f"  - device: {device}")
+        
         ckpt_dir = Path(ckpt_dir)
         
         # Always load to CPU first for non-CUDA devices to handle CUDA-saved models
         if device in ["cpu", "mps"]:
             map_location = torch.device('cpu')
+            logger.info(f"  - map_location set to: {map_location}")
         else:
             map_location = None
+            logger.info(f"  - map_location set to: None (CUDA)")
             
         ref_dict = None
         if (builtin_voice := ckpt_dir / "conds.pt").exists():
+            logger.info(f"  - Loading builtin voice from: {builtin_voice}")
             states = torch.load(builtin_voice, map_location=map_location)
             ref_dict = states['gen']
+            logger.info(f"  - Builtin voice loaded with {len(ref_dict)} keys")
+        else:
+            logger.info(f"  - No builtin voice found at: {builtin_voice}")
 
+        logger.info(f"  - Loading S3Gen model...")
         s3gen = S3Gen()
         s3gen.load_state_dict(
             load_file(ckpt_dir / "s3gen.safetensors"), strict=False
         )
         s3gen.to(device).eval()
+        logger.info(f"  - S3Gen model loaded and moved to {device}")
 
-        return cls(s3gen, device, ref_dict=ref_dict)
+        logger.info(f"  - Creating ChatterboxVC instance...")
+        result = cls(s3gen, device, ref_dict=ref_dict)
+        logger.info(f"✅ ChatterboxVC.from_local completed")
+        return result
 
     @classmethod
     def from_pretrained(cls, device) -> 'ChatterboxVC':
+        logger.info(f"🔧 ChatterboxVC.from_pretrained called")
+        logger.info(f"  - device: {device}")
+        
         # Check if MPS is available on macOS
         if device == "mps" and not torch.backends.mps.is_available():
             if not torch.backends.mps.is_built():
-                print("MPS not available because the current PyTorch install was not built with MPS enabled.")
+                logger.warning("MPS not available because the current PyTorch install was not built with MPS enabled.")
             else:
-                print("MPS not available because the current MacOS version is not 12.3+ and/or you do not have an MPS-enabled device on this machine.")
+                logger.warning("MPS not available because the current MacOS version is not 12.3+ and/or you do not have an MPS-enabled device on this machine.")
             device = "cpu"
+            logger.info(f"  - device changed to: {device}")
             
+        logger.info(f"  - Downloading model files...")
         for fpath in ["s3gen.safetensors", "conds.pt"]:
             local_path = hf_hub_download(repo_id=REPO_ID, filename=fpath)
+            logger.info(f"  - Downloaded: {fpath} -> {local_path}")
 
-        return cls.from_local(Path(local_path).parent, device)
+        logger.info(f"  - Calling from_local...")
+        result = cls.from_local(Path(local_path).parent, device)
+        logger.info(f"✅ ChatterboxVC.from_pretrained completed")
+        return result
 
     def set_target_voice(self, wav_fpath):
         ## Load reference wav
@@ -150,19 +185,23 @@ class ChatterboxVC:
         torch.Tensor
             A (1, samples) waveform tensor at ``self.sr``.
         """
+        logger.info(f"📝 ChatterboxVC.tts called")
+        logger.info(f"  - text length: {len(text)}")
+        logger.info(f"  - text preview: {text[:100]}...")
+        logger.info(f"  - finalize: {finalize}")
+        
         if self.ref_dict is None:
-            raise RuntimeError(
-                "ChatterboxVC.tts(): no voice profile loaded.  "
-                "Call `set_target_voice()` or construct with `ref_dict`."
-            )
+            error_msg = "ChatterboxVC.tts(): no voice profile loaded. Call `set_target_voice()` or construct with `ref_dict`."
+            logger.error(f"❌ {error_msg}")
+            raise RuntimeError(error_msg)
 
         # Ensure the S3Gen model has a text encoder attached.
         if not hasattr(self.s3gen, "text_encoder"):
-            raise RuntimeError(
-                "ChatterboxVC.tts(): `self.s3gen` has no `text_encoder`.  "
-                "Attach one with `self.s3gen.text_encoder = my_encoder`."
-            )
+            error_msg = "ChatterboxVC.tts(): `self.s3gen` has no `text_encoder`. Attach one with `self.s3gen.text_encoder = my_encoder`."
+            logger.error(f"❌ {error_msg}")
+            raise RuntimeError(error_msg)
 
+        logger.info(f"  - Starting TTS generation...")
         with torch.inference_mode():
             wav = self.s3gen.inference_from_text(
                 text,
@@ -173,7 +212,11 @@ class ChatterboxVC:
             watermarked = self.watermarker.apply_watermark(
                 wav_np, sample_rate=self.sr
             )
-        return torch.from_numpy(watermarked).unsqueeze(0)
+        
+        result = torch.from_numpy(watermarked).unsqueeze(0)
+        logger.info(f"✅ ChatterboxVC.tts completed successfully")
+        logger.info(f"  - Result tensor shape: {result.shape}")
+        return result
 
     # ------------------------------------------------------------------
     # Voice Profile Management
@@ -185,17 +228,24 @@ class ChatterboxVC:
         :param audio_file_path: Path to the reference audio file
         :param save_path: Path to save the voice profile (.npy)
         """
-        logger.info(f"💾 Saving voice profile from {audio_file_path} to {save_path}")
+        logger.info(f"💾 ChatterboxVC.save_voice_profile called")
+        logger.info(f"  - audio_file_path: {audio_file_path}")
+        logger.info(f"  - save_path: {save_path}")
         
         try:
             # Load reference audio
+            logger.info(f"  - Loading reference audio...")
             ref_wav, sr = librosa.load(audio_file_path, sr=None)
             ref_wav = torch.from_numpy(ref_wav).float()
+            logger.info(f"    - Audio loaded: shape={ref_wav.shape}, sr={sr}")
             
             # Get the full reference dictionary from s3gen
+            logger.info(f"  - Extracting voice embedding...")
             ref_dict = self.s3gen.embed_ref(ref_wav, sr, device=self.device)
+            logger.info(f"    - Embedding extracted: {len(ref_dict)} keys")
             
             # Create and save the complete voice profile
+            logger.info(f"  - Creating voice profile...")
             profile = VoiceProfile(
                 embedding=ref_dict["embedding"],
                 prompt_feat=ref_dict["prompt_feat"],
@@ -205,6 +255,7 @@ class ChatterboxVC:
             )
             
             # Convert to numpy format for saving
+            logger.info(f"  - Converting to numpy format...")
             profile_data = {
                 "embedding": profile.embedding.detach().cpu().numpy(),
             }
@@ -218,11 +269,15 @@ class ChatterboxVC:
                 profile_data["prompt_token_len"] = profile.prompt_token_len.detach().cpu().numpy()
             
             # Save profile
+            logger.info(f"  - Saving profile to {save_path}...")
             np.save(save_path, profile_data)
-            logger.info(f"✅ Voice profile saved to {save_path}")
+            logger.info(f"✅ ChatterboxVC.save_voice_profile completed successfully")
             
         except Exception as e:
-            logger.error(f"❌ Failed to save voice profile: {e}")
+            logger.error(f"❌ ChatterboxVC.save_voice_profile failed: {e}")
+            logger.error(f"  - Exception type: {type(e).__name__}")
+            import traceback
+            logger.error(f"  - Full traceback: {traceback.format_exc()}")
             raise
 
     def load_voice_profile(self, path: str):
@@ -259,13 +314,17 @@ class ChatterboxVC:
         
         :param voice_profile_path: Path to the voice profile (.npy)
         """
-        logger.info(f"🎯 Setting voice profile from {voice_profile_path}")
+        logger.info(f"🎯 ChatterboxVC.set_voice_profile called")
+        logger.info(f"  - voice_profile_path: {voice_profile_path}")
         
         try:
             # Load the voice profile
+            logger.info(f"  - Loading voice profile...")
             profile = self.load_voice_profile(voice_profile_path)
+            logger.info(f"    - Voice profile loaded successfully")
             
             # Create ref_dict from the loaded profile
+            logger.info(f"  - Creating ref_dict from profile...")
             self.ref_dict = {
                 "prompt_token": profile.prompt_token.to(self.device),
                 "prompt_token_len": profile.prompt_token_len.to(self.device),
@@ -273,11 +332,16 @@ class ChatterboxVC:
                 "prompt_feat_len": profile.prompt_feat_len,
                 "embedding": profile.embedding.to(self.device),
             }
+            logger.info(f"    - ref_dict created with {len(self.ref_dict)} keys")
+            logger.info(f"    - ref_dict keys: {list(self.ref_dict.keys())}")
             
-            logger.info(f"✅ Voice profile set successfully")
+            logger.info(f"✅ ChatterboxVC.set_voice_profile completed successfully")
             
         except Exception as e:
-            logger.error(f"❌ Failed to set voice profile: {e}")
+            logger.error(f"❌ ChatterboxVC.set_voice_profile failed: {e}")
+            logger.error(f"  - Exception type: {type(e).__name__}")
+            import traceback
+            logger.error(f"  - Full traceback: {traceback.format_exc()}")
             raise
 
     # ------------------------------------------------------------------
@@ -385,51 +449,90 @@ class ChatterboxVC:
     # ------------------------------------------------------------------
     # Voice Cloning Pipeline
     # ------------------------------------------------------------------
-    def create_voice_clone(self, audio_file_path: str, voice_id: str, output_dir: str = None) -> Dict:
+    def create_voice_clone(self, audio_file_path: str, voice_id: str, output_dir: str = None, metadata: Dict = None) -> Dict:
         """
         Complete voice cloning pipeline: create profile, generate sample, and return metadata.
         
         :param audio_file_path: Path to the reference audio file
         :param voice_id: Unique identifier for the voice
         :param output_dir: Directory to save outputs (optional)
+        :param metadata: Optional metadata from API app (name, language, is_kids_voice, etc.)
         :return: Dictionary with voice clone information
         """
-        logger.info(f"🎤 Starting voice clone creation for {voice_id}")
+        logger.info(f"🎤 ChatterboxVC.create_voice_clone called")
+        logger.info(f"  - audio_file_path: {audio_file_path}")
+        logger.info(f"  - voice_id: {voice_id}")
+        logger.info(f"  - output_dir: {output_dir}")
+        logger.info(f"  - metadata: {metadata}")
+        
+        # Use provided metadata or defaults
+        if metadata is None:
+            metadata = {}
+        
+        voice_name = metadata.get('name', voice_id.replace('voice_', ''))
+        language = metadata.get('language', 'en')
+        is_kids_voice = metadata.get('is_kids_voice', False)
+        custom_template = metadata.get('template_message')
+        
+        logger.info(f"  - Extracted metadata:")
+        logger.info(f"    - voice_name: {voice_name}")
+        logger.info(f"    - language: {language}")
+        logger.info(f"    - is_kids_voice: {is_kids_voice}")
+        logger.info(f"    - custom_template: {custom_template is not None}")
         
         try:
             # Step 1: Create voice profile
+            logger.info(f"  - Step 1: Creating voice profile...")
             if output_dir:
                 profile_path = Path(output_dir) / f"{voice_id}.npy"
             else:
                 profile_path = Path(f"{voice_id}.npy")
             
+            logger.info(f"    - profile_path: {profile_path}")
             self.save_voice_profile(audio_file_path, str(profile_path))
+            logger.info(f"    - Voice profile created successfully")
             
             # Step 2: Generate voice sample
-            template_message = f"Hello, this is the voice clone of {voice_id}. This voice is used to narrate whimsical stories and fairytales."
+            logger.info(f"  - Step 2: Generating voice sample...")
+            if custom_template:
+                template_message = custom_template
+            else:
+                template_message = f"Hello, this is the voice clone of {voice_name}. This voice is used to narrate whimsical stories and fairytales."
+            
+            logger.info(f"    - template_message: {template_message[:100]}...")
             
             # Set the voice profile for generation
+            logger.info(f"    - Setting voice profile...")
             self.set_voice_profile(str(profile_path))
             
             # Generate sample audio
+            logger.info(f"    - Generating TTS audio...")
             audio_tensor = self.tts(template_message)
+            logger.info(f"    - Audio tensor shape: {audio_tensor.shape}")
             
             # Convert to MP3 bytes
+            logger.info(f"    - Converting to MP3...")
             sample_mp3_bytes = self.tensor_to_mp3_bytes(audio_tensor, self.sr, "96k")
+            logger.info(f"    - MP3 bytes size: {len(sample_mp3_bytes)}")
             
             # Step 3: Convert original audio to MP3
+            logger.info(f"  - Step 3: Converting original audio...")
             if output_dir:
                 recorded_mp3_path = Path(output_dir) / f"{voice_id}_recorded.mp3"
             else:
                 recorded_mp3_path = Path(f"{voice_id}_recorded.mp3")
             
+            logger.info(f"    - recorded_mp3_path: {recorded_mp3_path}")
             self.convert_audio_file_to_mp3(audio_file_path, str(recorded_mp3_path), "160k")
             
             # Read recorded MP3 bytes
+            logger.info(f"    - Reading recorded MP3 bytes...")
             with open(recorded_mp3_path, 'rb') as f:
                 recorded_mp3_bytes = f.read()
+            logger.info(f"    - Recorded MP3 bytes size: {len(recorded_mp3_bytes)}")
             
             # Clean up temporary MP3 file
+            logger.info(f"    - Cleaning up temporary file...")
             if recorded_mp3_path.exists():
                 os.unlink(recorded_mp3_path)
             
@@ -448,11 +551,15 @@ class ChatterboxVC:
                 "status": "success"
             }
             
-            logger.info(f"✅ Voice clone created successfully for {voice_id}")
+            logger.info(f"✅ ChatterboxVC.create_voice_clone completed successfully")
+            logger.info(f"  - Result keys: {list(result.keys())}")
             return result
             
         except Exception as e:
-            logger.error(f"❌ Failed to create voice clone: {e}")
+            logger.error(f"❌ ChatterboxVC.create_voice_clone failed: {e}")
+            logger.error(f"  - Exception type: {type(e).__name__}")
+            import traceback
+            logger.error(f"  - Full traceback: {traceback.format_exc()}")
             return {
                 "voice_id": voice_id,
                 "status": "error",
