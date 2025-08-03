@@ -64,20 +64,22 @@ class ChatterboxVC:
         logger.info(f"  - Available methods: {[m for m in dir(self) if not m.startswith('_')]}")
         
         # Debug: Check for specific methods
-        expected_methods = [
+        expected_vc_methods = [
             'create_voice_clone',
             'save_voice_profile', 
             'load_voice_profile',
             'set_voice_profile',
             'tensor_to_mp3_bytes',
+            'tensor_to_audiosegment',
+            'tensor_to_wav_bytes',
             'convert_audio_file_to_mp3'
         ]
         
         available_methods = [m for m in dir(self) if not m.startswith('_')]
-        missing_methods = [m for m in expected_methods if m not in available_methods]
+        missing_methods = [m for m in expected_vc_methods if m not in available_methods]
         
         logger.info(f"🔍 VC Method Check:")
-        logger.info(f"  - Expected methods: {expected_methods}")
+        logger.info(f"  - Expected methods: {expected_vc_methods}")
         logger.info(f"  - Available methods: {available_methods}")
         logger.info(f"  - Missing methods: {missing_methods}")
         
@@ -382,7 +384,7 @@ class ChatterboxVC:
         if PYDUB_AVAILABLE:
             try:
                 # Convert tensor to AudioSegment
-                audio_segment = self._tensor_to_audiosegment(audio_tensor, sample_rate)
+                audio_segment = self.tensor_to_audiosegment(audio_tensor, sample_rate)
                 # Export to MP3 bytes
                 mp3_file = audio_segment.export(format="mp3", bitrate=bitrate)
                 # Read the bytes from the file object
@@ -390,12 +392,12 @@ class ChatterboxVC:
                 return mp3_bytes
             except Exception as e:
                 logger.warning(f"Direct MP3 conversion failed: {e}, falling back to WAV")
-                return self._tensor_to_wav_bytes(audio_tensor, sample_rate)
+                return self.tensor_to_wav_bytes(audio_tensor, sample_rate)
         else:
             logger.warning("pydub not available, falling back to WAV")
-            return self._tensor_to_wav_bytes(audio_tensor, sample_rate)
+            return self.tensor_to_wav_bytes(audio_tensor, sample_rate)
 
-    def _tensor_to_audiosegment(self, audio_tensor: torch.Tensor, sample_rate: int):
+    def tensor_to_audiosegment(self, audio_tensor: torch.Tensor, sample_rate: int):
         """
         Convert PyTorch audio tensor to pydub AudioSegment.
         
@@ -427,7 +429,7 @@ class ChatterboxVC:
         
         return audio_segment
 
-    def _tensor_to_wav_bytes(self, audio_tensor: torch.Tensor, sample_rate: int) -> bytes:
+    def tensor_to_wav_bytes(self, audio_tensor: torch.Tensor, sample_rate: int) -> bytes:
         """
         Convert audio tensor to WAV bytes (fallback).
         
@@ -472,12 +474,13 @@ class ChatterboxVC:
     # ------------------------------------------------------------------
     # Voice Cloning Pipeline
     # ------------------------------------------------------------------
-    def create_voice_clone(self, audio_file_path: str, voice_id: str, output_dir: str = None, metadata: Dict = None) -> Dict:
+    def create_voice_clone(self, audio_file_path: str, voice_id: str, voice_name: str = None, output_dir: str = None, metadata: Dict = None, **kwargs) -> Dict:
         """
         Complete voice cloning pipeline: create profile, generate sample, and return metadata.
         
         :param audio_file_path: Path to the reference audio file
         :param voice_id: Unique identifier for the voice
+        :param voice_name: Optional display name for the voice
         :param output_dir: Directory to save outputs (optional)
         :param metadata: Optional metadata from API app (name, language, is_kids_voice, etc.)
         :return: Dictionary with voice clone information
@@ -485,6 +488,7 @@ class ChatterboxVC:
         logger.info(f"🎤 ChatterboxVC.create_voice_clone called")
         logger.info(f"  - audio_file_path: {audio_file_path}")
         logger.info(f"  - voice_id: {voice_id}")
+        logger.info(f"  - voice_name: {voice_name}")
         logger.info(f"  - output_dir: {output_dir}")
         logger.info(f"  - metadata: {metadata}")
         
@@ -492,7 +496,13 @@ class ChatterboxVC:
         if metadata is None:
             metadata = {}
         
-        voice_name = metadata.get('name', voice_id.replace('voice_', ''))
+        if voice_name is not None:
+            logger.info(f"  - Using provided voice_name: {voice_name}")
+            voice_name = voice_name
+        else:
+            voice_name = metadata.get('name', voice_id.replace('voice_', ''))
+            logger.info(f"  - Using default voice_name: {voice_name}")
+        
         language = metadata.get('language', 'en')
         is_kids_voice = metadata.get('is_kids_voice', False)
         custom_template = metadata.get('template_message')

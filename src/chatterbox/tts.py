@@ -4,6 +4,7 @@ import os
 import tempfile
 import logging
 from typing import List, Optional, Tuple, Dict
+from datetime import datetime
 
 import librosa
 import torch
@@ -12,6 +13,7 @@ import torch.nn.functional as F
 from huggingface_hub import hf_hub_download
 from safetensors.torch import load_file
 import torchaudio
+import numpy as np
 
 from .models.t3 import T3
 from .models.s3tokenizer import S3_SR, drop_invalid_tokens
@@ -161,22 +163,24 @@ class ChatterboxTTS:
         logger.info(f"  - Available methods: {[m for m in dir(self) if not m.startswith('_')]}")
         
         # Debug: Check for specific methods
-        expected_methods = [
+        expected_tts_methods = [
             'generate_tts_story',
             'generate_long_text',
             'chunk_text',
             'generate_chunks',
             'stitch_and_normalize',
             'cleanup_chunks',
-            '_tensor_to_mp3_bytes',
-            '_upload_to_firebase'
+            'tensor_to_mp3_bytes',
+            'tensor_to_audiosegment',
+            'tensor_to_wav_bytes',
+            'upload_to_firebase'
         ]
         
         available_methods = [m for m in dir(self) if not m.startswith('_')]
-        missing_methods = [m for m in expected_methods if m not in available_methods]
+        missing_methods = [m for m in expected_tts_methods if m not in available_methods]
         
         logger.info(f"🔍 TTS Method Check:")
-        logger.info(f"  - Expected methods: {expected_methods}")
+        logger.info(f"  - Expected methods: {expected_tts_methods}")
         logger.info(f"  - Available methods: {available_methods}")
         logger.info(f"  - Missing methods: {missing_methods}")
         
@@ -515,11 +519,11 @@ class ChatterboxTTS:
                 logger.info(f"📝 NLTK tokenization successful: {len(sentences)} sentences")
             except Exception as e:
                 logger.warning(f"⚠️ NLTK tokenization failed: {e} - using fallback")
-                sentences = self._simple_sentence_split(text)
+                sentences = self.simple_sentence_split(text)
         else:
             # Fallback to simple sentence splitting
             logger.info("📝 Using fallback sentence splitting (NLTK not available)")
-            sentences = self._simple_sentence_split(text)
+            sentences = self.simple_sentence_split(text)
 
         chunks, current = [], ""
         for sent in sentences:
@@ -535,36 +539,35 @@ class ChatterboxTTS:
         logger.info(f"📦 Text chunking: {len(sentences)} sentences → {len(chunks)} chunks")
         return chunks
     
-    def _simple_sentence_split(self, text: str) -> List[str]:
+    def simple_sentence_split(self, text: str) -> List[str]:
         """
-        Simple sentence splitting fallback when NLTK is not available.
+        Simple sentence splitting using punctuation marks.
         
-        :param text: Text to split into sentences
+        :param text: Text to split
         :return: List of sentences
         """
-        # Clean up the text
-        text = text.replace('\n', ' ').replace('\r', ' ')
+        logger.info(f"📝 Simple sentence splitting for text length: {len(text)}")
         
-        # Split on sentence endings
-        sentence_endings = ['.', '!', '?']
+        # Simple sentence endings
+        sentence_endings = ['.', '!', '?', '\n']
+        
         sentences = []
-        current = ""
+        current_sentence = ""
         
         for char in text:
-            current += char
+            current_sentence += char
             if char in sentence_endings:
-                sentence = current.strip()
+                # Clean up the sentence
+                sentence = current_sentence.strip()
                 if sentence:
                     sentences.append(sentence)
-                current = ""
+                current_sentence = ""
         
-        # Add any remaining text
-        if current.strip():
-            sentences.append(current.strip())
+        # Add any remaining text as a sentence
+        if current_sentence.strip():
+            sentences.append(current_sentence.strip())
         
-        # Filter out empty sentences
-        sentences = [s for s in sentences if s.strip()]
-        
+        logger.info(f"✅ Split into {len(sentences)} sentences")
         return sentences
 
     def generate_chunks(self, chunks: List[str], voice_profile_path: str, temperature: float = 0.8, 
@@ -752,7 +755,7 @@ class ChatterboxTTS:
     # ------------------------------------------------------------------
     # Complete TTS Pipeline with Firebase Upload
     # ------------------------------------------------------------------
-    def _tensor_to_mp3_bytes(self, audio_tensor: torch.Tensor, sample_rate: int, bitrate: str = "96k") -> bytes:
+    def tensor_to_mp3_bytes(self, audio_tensor: torch.Tensor, sample_rate: int, bitrate: str = "96k") -> bytes:
         """
         Convert audio tensor directly to MP3 bytes.
         
@@ -764,7 +767,7 @@ class ChatterboxTTS:
         if PYDUB_AVAILABLE:
             try:
                 # Convert tensor to AudioSegment
-                audio_segment = self._tensor_to_audiosegment(audio_tensor, sample_rate)
+                audio_segment = self.tensor_to_audiosegment(audio_tensor, sample_rate)
                 # Export to MP3 bytes
                 mp3_file = audio_segment.export(format="mp3", bitrate=bitrate)
                 # Read the bytes from the file object
@@ -772,12 +775,12 @@ class ChatterboxTTS:
                 return mp3_bytes
             except Exception as e:
                 logger.warning(f"Direct MP3 conversion failed: {e}, falling back to WAV")
-                return self._tensor_to_wav_bytes(audio_tensor, sample_rate)
+                return self.tensor_to_wav_bytes(audio_tensor, sample_rate)
         else:
             logger.warning("pydub not available, falling back to WAV")
-            return self._tensor_to_wav_bytes(audio_tensor, sample_rate)
+            return self.tensor_to_wav_bytes(audio_tensor, sample_rate)
 
-    def _tensor_to_audiosegment(self, audio_tensor: torch.Tensor, sample_rate: int):
+    def tensor_to_audiosegment(self, audio_tensor: torch.Tensor, sample_rate: int):
         """
         Convert PyTorch audio tensor to pydub AudioSegment.
         
@@ -809,7 +812,7 @@ class ChatterboxTTS:
         
         return audio_segment
 
-    def _tensor_to_wav_bytes(self, audio_tensor: torch.Tensor, sample_rate: int) -> bytes:
+    def tensor_to_wav_bytes(self, audio_tensor: torch.Tensor, sample_rate: int) -> bytes:
         """
         Convert audio tensor to WAV bytes (fallback).
         
@@ -830,7 +833,7 @@ class ChatterboxTTS:
         
         return wav_bytes
 
-    def _upload_to_firebase(self, data: bytes, destination_blob_name: str, content_type: str = "application/octet-stream", metadata: dict = None) -> str:
+    def upload_to_firebase(self, data: bytes, destination_blob_name: str, content_type: str = "application/octet-stream", metadata: dict = None) -> str:
         """
         Upload data directly to Firebase Storage with metadata
         
@@ -876,36 +879,28 @@ class ChatterboxTTS:
                           language: str = 'en', story_type: str = 'user', 
                           is_kids_voice: bool = False, metadata: Dict = None) -> Dict:
         """
-        Complete TTS pipeline: generate → convert → upload to Firebase → return URLs
+        Complete TTS pipeline: generate long text, convert to MP3, upload to Firebase.
         
         :param text: Text to synthesize
         :param voice_profile_path: Path to voice profile
         :param voice_id: Unique voice identifier
-        :param language: Language for Firebase organization
-        :param story_type: Type of story (user, sample, etc.)
-        :param is_kids_voice: Whether this is a kids voice
-        :param metadata: Optional additional metadata
-        :return: Dictionary with Firebase URLs and metadata
+        :param language: Language code
+        :param story_type: Type of story
+        :param is_kids_voice: Whether it's a kids voice
+        :param metadata: Additional metadata
+        :return: Dictionary with TTS results
         """
-        from datetime import datetime
-        
-        logger.info(f"🎵 Starting TTS story generation for {voice_id}")
+        logger.info(f"📚 ChatterboxTTS.generate_tts_story called")
+        logger.info(f"  - text length: {len(text)}")
+        logger.info(f"  - voice_profile_path: {voice_profile_path}")
+        logger.info(f"  - voice_id: {voice_id}")
         
         try:
-            # Generate timestamp
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            
-            # Create output path
-            output_path = f"/tmp/tts_generated/{voice_id}_{timestamp}.wav"
-            
-            # Ensure output directory exists
-            os.makedirs(os.path.dirname(output_path), exist_ok=True)
-            
-            # Use the long text TTS functionality
-            audio_tensor, sample_rate, tts_metadata = self.generate_long_text(
+            # Generate long text audio
+            audio_tensor, sample_rate, generation_metadata = self.generate_long_text(
                 text=text,
                 voice_profile_path=voice_profile_path,
-                output_path=output_path,
+                output_path="./temp_tts_output.wav",
                 max_chars=500,
                 pause_ms=150,
                 temperature=0.8,
@@ -913,77 +908,72 @@ class ChatterboxTTS:
                 cfg_weight=0.5
             )
             
-            # Convert to MP3 bytes
-            mp3_bytes = self._tensor_to_mp3_bytes(audio_tensor, sample_rate, "96k")
+            # Convert to MP3 bytes (use VC's method if available, otherwise fallback)
+            try:
+                # Try to use VC's method if available
+                from .vc import ChatterboxVC
+                vc_model = ChatterboxVC.from_pretrained(device=self.device)
+                mp3_bytes = vc_model.tensor_to_mp3_bytes(audio_tensor, sample_rate, "96k")
+                logger.info("  - Used VC's tensor_to_mp3_bytes method")
+            except Exception as e:
+                logger.warning(f"  - Failed to use VC's method: {e}, using fallback")
+                # Fallback to WAV bytes
+                import tempfile
+                import os
+                temp_wav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+                torchaudio.save(temp_wav.name, audio_tensor, sample_rate)
+                with open(temp_wav.name, 'rb') as f:
+                    mp3_bytes = f.read()
+                os.unlink(temp_wav.name)
+            
+            # Create Firebase path
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            firebase_path = f"voices/{language}/samples/{voice_id}_sample_{timestamp}.mp3"
             
             # Upload to Firebase
-            if is_kids_voice:
-                firebase_path = f"audio/stories/{language}/kids/{story_type}/TTS_{voice_id}_{timestamp}.mp3"
-            else:
-                firebase_path = f"audio/stories/{language}/{story_type}/TTS_{voice_id}_{timestamp}.mp3"
-            
-            # Prepare Firebase metadata
-            firebase_metadata = {
-                'voice_id': voice_id,
-                'language': language,
-                'story_type': story_type,
-                'is_kids_voice': str(is_kids_voice),
-                'format': '96k_mp3',
-                'timestamp': timestamp,
-                'model': 'chatterbox_tts',
-                'created_date': datetime.now().isoformat(),
-                'text_length': len(text),
-                'chunk_count': tts_metadata.get('chunk_count', 0),
-                'duration_sec': tts_metadata.get('duration_sec', 0),
-                'Access-Control-Allow-Origin': '*',
-                'Cache-Control': 'public, max-age=3600'
-            }
-            
-            # Add optional metadata
-            if metadata:
-                firebase_metadata.update(metadata)
-            
-            # Upload to Firebase
-            firebase_url = self._upload_to_firebase(
+            firebase_url = self.upload_to_firebase(
                 mp3_bytes,
                 firebase_path,
-                "audio/mpeg",
-                firebase_metadata
-            )
-            
-            # Clean up temporary file
-            try:
-                if os.path.exists(output_path):
-                    os.unlink(output_path)
-            except Exception as cleanup_error:
-                logger.warning(f"⚠️ Failed to clean up temp file: {cleanup_error}")
-            
-            logger.info(f"✅ TTS story generation completed for {voice_id}")
-            
-            return {
-                "status": "success",
-                "voice_id": voice_id,
-                "audio_path": firebase_path,
-                "audio_url": firebase_url,
-                "generation_time": tts_metadata.get("duration_sec", 0),
-                "model": "chatterbox_tts",
-                "metadata": {
-                    **tts_metadata,
+                content_type="audio/mpeg",
+                metadata={
                     "voice_id": voice_id,
                     "language": language,
                     "story_type": story_type,
                     "is_kids_voice": is_kids_voice,
-                    "firebase_path": firebase_path,
-                    "firebase_url": firebase_url,
                     "text_length": len(text),
-                    "timestamp": timestamp
+                    "audio_duration": audio_tensor.shape[1] / sample_rate,
+                    "sample_rate": sample_rate,
+                    **(metadata or {})
                 }
+            )
+            
+            # Return comprehensive results
+            result = {
+                "voice_id": voice_id,
+                "firebase_url": firebase_url,
+                "audio_bytes": mp3_bytes,
+                "audio_size": len(mp3_bytes),
+                "audio_tensor_shape": list(audio_tensor.shape),
+                "sample_rate": sample_rate,
+                "text_length": len(text),
+                "language": language,
+                "story_type": story_type,
+                "is_kids_voice": is_kids_voice,
+                "generation_metadata": generation_metadata,
+                "status": "success"
             }
             
+            logger.info(f"✅ ChatterboxTTS.generate_tts_story completed successfully")
+            logger.info(f"  - Firebase URL: {firebase_url}")
+            return result
+            
         except Exception as e:
-            logger.error(f"❌ TTS story generation failed: {e}")
+            logger.error(f"❌ ChatterboxTTS.generate_tts_story failed: {e}")
+            logger.error(f"  - Exception type: {type(e).__name__}")
+            import traceback
+            logger.error(f"  - Full traceback: {traceback.format_exc()}")
             return {
+                "voice_id": voice_id,
                 "status": "error",
-                "error": str(e),
-                "voice_id": voice_id
+                "error": str(e)
             }
