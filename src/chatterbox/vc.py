@@ -14,6 +14,9 @@ from safetensors.torch import load_file
 
 from .models.s3tokenizer import S3_SR
 from .models.s3gen import S3GEN_SR, S3Gen, VoiceProfile
+from .models.voice_encoder import VoiceEncoder
+from .models.t3 import T3
+from .models.tokenizer import EnTokenizer
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -104,6 +107,46 @@ class ChatterboxVC:
             map_location = None
             logger.info(f"  - map_location set to: None (CUDA)")
             
+        # Load VoiceEncoder
+        logger.info(f"  - Loading VoiceEncoder...")
+        ve = VoiceEncoder()
+        ve.load_state_dict(
+            load_file(ckpt_dir / "ve.safetensors")
+        )
+        ve.to(device).eval()
+        logger.info(f"  - VoiceEncoder loaded and moved to {device}")
+
+        # Load T3 text encoder
+        logger.info(f"  - Loading T3 text encoder...")
+        t3 = T3()
+        t3_state = load_file(ckpt_dir / "t3_cfg.safetensors")
+        if "model" in t3_state.keys():
+            t3_state = t3_state["model"][0]
+        t3.load_state_dict(t3_state)
+        t3.to(device).eval()
+        logger.info(f"  - T3 text encoder loaded and moved to {device}")
+
+        # Load S3Gen
+        logger.info(f"  - Loading S3Gen model...")
+        s3gen = S3Gen()
+        s3gen.load_state_dict(
+            load_file(ckpt_dir / "s3gen.safetensors"), strict=False
+        )
+        s3gen.to(device).eval()
+        logger.info(f"  - S3Gen model loaded and moved to {device}")
+
+        # Attach T3 as text_encoder to S3Gen (required for TTS)
+        logger.info(f"  - Attaching T3 as text_encoder to S3Gen...")
+        s3gen.text_encoder = t3
+        logger.info(f"  - T3 text_encoder attached to S3Gen")
+
+        # Load tokenizer
+        logger.info(f"  - Loading tokenizer...")
+        tokenizer = EnTokenizer(
+            str(ckpt_dir / "tokenizer.json")
+        )
+        logger.info(f"  - Tokenizer loaded")
+            
         ref_dict = None
         if (builtin_voice := ckpt_dir / "conds.pt").exists():
             logger.info(f"  - Loading builtin voice from: {builtin_voice}")
@@ -112,14 +155,6 @@ class ChatterboxVC:
             logger.info(f"  - Builtin voice loaded with {len(ref_dict)} keys")
         else:
             logger.info(f"  - No builtin voice found at: {builtin_voice}")
-
-        logger.info(f"  - Loading S3Gen model...")
-        s3gen = S3Gen()
-        s3gen.load_state_dict(
-            load_file(ckpt_dir / "s3gen.safetensors"), strict=False
-        )
-        s3gen.to(device).eval()
-        logger.info(f"  - S3Gen model loaded and moved to {device}")
 
         logger.info(f"  - Creating ChatterboxVC instance...")
         result = cls(s3gen, device, ref_dict=ref_dict)
@@ -141,7 +176,7 @@ class ChatterboxVC:
             logger.info(f"  - device changed to: {device}")
             
         logger.info(f"  - Downloading model files...")
-        for fpath in ["s3gen.safetensors", "conds.pt"]:
+        for fpath in ["ve.safetensors", "t3_cfg.safetensors", "s3gen.safetensors", "tokenizer.json", "conds.pt"]:
             local_path = hf_hub_download(repo_id=REPO_ID, filename=fpath)
             logger.info(f"  - Downloaded: {fpath} -> {local_path}")
 
