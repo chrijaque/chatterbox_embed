@@ -415,6 +415,120 @@ torchaudio.save("converted.wav", converted_audio, vc_model.sr)
 
 See `example_voice_cloning.py` for a complete demonstration.
 
+## Complete TTS Pipeline with Firebase Upload
+
+The `ChatterboxTTS` class now includes a complete TTS pipeline that handles text generation, audio processing, and Firebase upload in a single method call. This eliminates the need for complex orchestration in API applications.
+
+### Basic TTS Story Generation
+```python
+import torch
+from chatterbox.tts import ChatterboxTTS
+
+# Initialize model
+model = ChatterboxTTS.from_pretrained(device="cuda")
+
+# Generate TTS story with Firebase upload
+result = model.generate_tts_story(
+    text="Once upon a time, in a magical forest...",
+    voice_profile_path="voice_profile.npy",
+    voice_id="voice_professor_hoot",
+    language="en",
+    story_type="user",
+    is_kids_voice=False,
+    metadata={
+        "user_id": "user_123",
+        "project_id": "story_456",
+        "story_title": "The Magical Forest"
+    }
+)
+
+if result["status"] == "success":
+    print(f"Audio URL: {result['audio_url']}")
+    print(f"Generation time: {result['generation_time']:.2f} seconds")
+```
+
+### API App Integration
+```python
+# API app sends minimal request
+tts_request = {
+    "text": "Your story text here...",
+    "voice_id": "voice_john_doe",
+    "profile_base64": "base64_encoded_profile",
+    "language": "en",
+    "story_type": "user",
+    "is_kids_voice": false,
+    "metadata": {
+        "user_id": "user_123",
+        "project_id": "project_456"
+    }
+}
+
+# TTS endpoint returns complete result
+response = {
+    "status": "success",
+    "voice_id": "voice_john_doe",
+    "audio_path": "audio/stories/en/user/TTS_voice_john_doe_20250803.mp3",
+    "audio_url": "https://firebase-storage-url",
+    "generation_time": 45.2,
+    "model": "chatterbox_tts",
+    "metadata": {
+        "chunk_count": 5,
+        "duration_sec": 45.2,
+        "text_length": 2500,
+        "sample_rate": 24000
+    }
+}
+```
+
+### Complete TTS Pipeline Features
+
+- **📝 Long Text Processing**: Automatic chunking and stitching for long stories
+- **🎵 Audio Conversion**: Professional MP3 conversion with configurable bitrates
+- **☁️ Firebase Upload**: Direct upload to Firebase Storage with metadata
+- **📊 Comprehensive Metadata**: Detailed information about generation process
+- **🔄 Error Handling**: Robust error handling with fallback options
+- **🧹 Automatic Cleanup**: Temporary file cleanup and memory management
+
+### TTS Pipeline Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `text` | Required | Text to synthesize |
+| `voice_profile_path` | Required | Path to voice profile (.npy) |
+| `voice_id` | Required | Unique voice identifier |
+| `language` | 'en' | Language for Firebase organization |
+| `story_type` | 'user' | Type of story (user, sample, etc.) |
+| `is_kids_voice` | False | Whether this is a kids voice |
+| `metadata` | None | Optional additional metadata |
+
+### Firebase Organization
+
+The TTS pipeline automatically organizes files in Firebase:
+
+```
+audio/stories/
+├── en/
+│   ├── user/
+│   │   └── TTS_voice_id_timestamp.mp3
+│   └── kids/
+│       └── TTS_voice_id_timestamp.mp3
+└── es/
+    ├── user/
+    │   └── TTS_voice_id_timestamp.mp3
+    └── kids/
+        └── TTS_voice_id_timestamp.mp3
+```
+
+### Benefits of Complete TTS Pipeline
+
+- **🎯 One Method Call**: Single method handles everything
+- **⚡ Simplified API**: API app just sends text + voice, gets back Firebase URL
+- **🔄 Reusable**: Can be used in any application
+- **📊 Professional**: High-quality audio processing and upload
+- **🛡️ Robust**: Comprehensive error handling and logging
+
+See `example_tts_pipeline.py` for a complete demonstration.
+
 See `example_tts.py`, `example_vc.py`, and `example_tts_with_voice_cloning.py` for more examples.
 
 # Supported Lanugage

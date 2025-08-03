@@ -720,3 +720,242 @@ class ChatterboxTTS:
         }
         
         return audio_tensor, sample_rate, metadata
+
+    # ------------------------------------------------------------------
+    # Complete TTS Pipeline with Firebase Upload
+    # ------------------------------------------------------------------
+    def _tensor_to_mp3_bytes(self, audio_tensor: torch.Tensor, sample_rate: int, bitrate: str = "96k") -> bytes:
+        """
+        Convert audio tensor directly to MP3 bytes.
+        
+        :param audio_tensor: PyTorch audio tensor
+        :param sample_rate: Audio sample rate
+        :param bitrate: MP3 bitrate (e.g., "96k", "128k", "160k")
+        :return: MP3 bytes
+        """
+        if PYDUB_AVAILABLE:
+            try:
+                # Convert tensor to AudioSegment
+                audio_segment = self._tensor_to_audiosegment(audio_tensor, sample_rate)
+                # Export to MP3 bytes
+                mp3_file = audio_segment.export(format="mp3", bitrate=bitrate)
+                # Read the bytes from the file object
+                mp3_bytes = mp3_file.read()
+                return mp3_bytes
+            except Exception as e:
+                logger.warning(f"Direct MP3 conversion failed: {e}, falling back to WAV")
+                return self._tensor_to_wav_bytes(audio_tensor, sample_rate)
+        else:
+            logger.warning("pydub not available, falling back to WAV")
+            return self._tensor_to_wav_bytes(audio_tensor, sample_rate)
+
+    def _tensor_to_audiosegment(self, audio_tensor: torch.Tensor, sample_rate: int):
+        """
+        Convert PyTorch audio tensor to pydub AudioSegment.
+        
+        :param audio_tensor: PyTorch audio tensor
+        :param sample_rate: Audio sample rate
+        :return: pydub AudioSegment
+        """
+        if not PYDUB_AVAILABLE:
+            raise ImportError("pydub is required for audio conversion")
+        
+        # Convert tensor to numpy array
+        if audio_tensor.dim() == 2:
+            # Stereo: (channels, samples)
+            audio_np = audio_tensor.numpy()
+        else:
+            # Mono: (samples,) -> (1, samples)
+            audio_np = audio_tensor.unsqueeze(0).numpy()
+        
+        # Convert to int16 for pydub
+        audio_np = (audio_np * 32767).astype(np.int16)
+        
+        # Create AudioSegment
+        audio_segment = AudioSegment(
+            audio_np.tobytes(),
+            frame_rate=sample_rate,
+            sample_width=2,  # 16-bit
+            channels=audio_np.shape[0]
+        )
+        
+        return audio_segment
+
+    def _tensor_to_wav_bytes(self, audio_tensor: torch.Tensor, sample_rate: int) -> bytes:
+        """
+        Convert audio tensor to WAV bytes (fallback).
+        
+        :param audio_tensor: PyTorch audio tensor
+        :param sample_rate: Audio sample rate
+        :return: WAV bytes
+        """
+        # Save to temporary WAV file
+        temp_wav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        torchaudio.save(temp_wav.name, audio_tensor, sample_rate)
+        
+        # Read WAV bytes
+        with open(temp_wav.name, 'rb') as f:
+            wav_bytes = f.read()
+        
+        # Clean up temp file
+        os.unlink(temp_wav.name)
+        
+        return wav_bytes
+
+    def _upload_to_firebase(self, data: bytes, destination_blob_name: str, content_type: str = "application/octet-stream", metadata: dict = None) -> str:
+        """
+        Upload data directly to Firebase Storage with metadata
+        
+        :param data: Binary data to upload
+        :param destination_blob_name: Destination path in Firebase
+        :param content_type: MIME type of the file
+        :param metadata: Optional metadata to store with the file
+        :return: Public URL
+        """
+        try:
+            from google.cloud import storage
+            
+            # Initialize Firebase storage client
+            storage_client = storage.Client()
+            bucket = storage_client.bucket("godnathistorie-a25fa.firebasestorage.app")
+            
+            logger.info(f"🔍 Starting Firebase upload: {destination_blob_name} ({len(data)} bytes)")
+            
+            # Create blob and upload
+            blob = bucket.blob(destination_blob_name)
+            
+            # Set metadata if provided
+            if metadata:
+                blob.metadata = metadata
+            
+            # Upload the data
+            blob.upload_from_string(data, content_type=content_type)
+            
+            # Make the blob publicly accessible
+            blob.make_public()
+            
+            public_url = blob.public_url
+            logger.info(f"✅ Uploaded to Firebase: {destination_blob_name} -> {public_url}")
+            
+            return public_url
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to upload to Firebase: {e}")
+            # Return the path as fallback
+            return f"https://storage.googleapis.com/godnathistorie-a25fa.firebasestorage.app/{destination_blob_name}"
+
+    def generate_tts_story(self, text: str, voice_profile_path: str, voice_id: str, 
+                          language: str = 'en', story_type: str = 'user', 
+                          is_kids_voice: bool = False, metadata: Dict = None) -> Dict:
+        """
+        Complete TTS pipeline: generate → convert → upload to Firebase → return URLs
+        
+        :param text: Text to synthesize
+        :param voice_profile_path: Path to voice profile
+        :param voice_id: Unique voice identifier
+        :param language: Language for Firebase organization
+        :param story_type: Type of story (user, sample, etc.)
+        :param is_kids_voice: Whether this is a kids voice
+        :param metadata: Optional additional metadata
+        :return: Dictionary with Firebase URLs and metadata
+        """
+        from datetime import datetime
+        
+        logger.info(f"🎵 Starting TTS story generation for {voice_id}")
+        
+        try:
+            # Generate timestamp
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            
+            # Create output path
+            output_path = f"/tmp/tts_generated/{voice_id}_{timestamp}.wav"
+            
+            # Ensure output directory exists
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            
+            # Use the long text TTS functionality
+            audio_tensor, sample_rate, tts_metadata = self.generate_long_text(
+                text=text,
+                voice_profile_path=voice_profile_path,
+                output_path=output_path,
+                max_chars=500,
+                pause_ms=150,
+                temperature=0.8,
+                exaggeration=0.5,
+                cfg_weight=0.5
+            )
+            
+            # Convert to MP3 bytes
+            mp3_bytes = self._tensor_to_mp3_bytes(audio_tensor, sample_rate, "96k")
+            
+            # Upload to Firebase
+            if is_kids_voice:
+                firebase_path = f"audio/stories/{language}/kids/{story_type}/TTS_{voice_id}_{timestamp}.mp3"
+            else:
+                firebase_path = f"audio/stories/{language}/{story_type}/TTS_{voice_id}_{timestamp}.mp3"
+            
+            # Prepare Firebase metadata
+            firebase_metadata = {
+                'voice_id': voice_id,
+                'language': language,
+                'story_type': story_type,
+                'is_kids_voice': str(is_kids_voice),
+                'format': '96k_mp3',
+                'timestamp': timestamp,
+                'model': 'chatterbox_tts',
+                'created_date': datetime.now().isoformat(),
+                'text_length': len(text),
+                'chunk_count': tts_metadata.get('chunk_count', 0),
+                'duration_sec': tts_metadata.get('duration_sec', 0),
+                'Access-Control-Allow-Origin': '*',
+                'Cache-Control': 'public, max-age=3600'
+            }
+            
+            # Add optional metadata
+            if metadata:
+                firebase_metadata.update(metadata)
+            
+            # Upload to Firebase
+            firebase_url = self._upload_to_firebase(
+                mp3_bytes,
+                firebase_path,
+                "audio/mpeg",
+                firebase_metadata
+            )
+            
+            # Clean up temporary file
+            try:
+                if os.path.exists(output_path):
+                    os.unlink(output_path)
+            except Exception as cleanup_error:
+                logger.warning(f"⚠️ Failed to clean up temp file: {cleanup_error}")
+            
+            logger.info(f"✅ TTS story generation completed for {voice_id}")
+            
+            return {
+                "status": "success",
+                "voice_id": voice_id,
+                "audio_path": firebase_path,
+                "audio_url": firebase_url,
+                "generation_time": tts_metadata.get("duration_sec", 0),
+                "model": "chatterbox_tts",
+                "metadata": {
+                    **tts_metadata,
+                    "voice_id": voice_id,
+                    "language": language,
+                    "story_type": story_type,
+                    "is_kids_voice": is_kids_voice,
+                    "firebase_path": firebase_path,
+                    "firebase_url": firebase_url,
+                    "text_length": len(text),
+                    "timestamp": timestamp
+                }
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ TTS story generation failed: {e}")
+            return {
+                "status": "error",
+                "error": str(e),
+                "voice_id": voice_id
+            }
