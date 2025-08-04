@@ -602,28 +602,38 @@ class ChatterboxVC:
             # Upload files to Firebase
             logger.info(f"  - Uploading files to Firebase...")
             
-            # Get language from metadata or default to 'en'
+            # Get language and is_kids_voice from metadata or default to 'en' and False
             language = (metadata or {}).get('language', 'en')
+            is_kids_voice = (metadata or {}).get('is_kids_voice', False)
             logger.info(f"    - Using language: {language}")
+            logger.info(f"    - Is kids voice: {is_kids_voice}")
+            
+            # Determine the base path based on is_kids_voice
+            if is_kids_voice:
+                base_path = f"audio/voices/{language}/kids"
+                logger.info(f"    - Using kids folder: {base_path}")
+            else:
+                base_path = f"audio/voices/{language}"
+                logger.info(f"    - Using regular folder: {base_path}")
             
             # Upload sample audio to correct bucket path
             self.upload_to_firebase(
                 sample_audio_path, 
-                f"audio/voices/{language}/samples/{voice_id}_sample.mp3",
+                f"{base_path}/samples/{voice_id}_sample.mp3",
                 content_type="audio/mpeg"
             )
             
             # Upload recorded audio to correct bucket path
             self.upload_to_firebase(
                 recorded_audio_path, 
-                f"audio/voices/{language}/recorded/{voice_id}_recorded.mp3",
+                f"{base_path}/recorded/{voice_id}_recorded.mp3",
                 content_type="audio/mpeg"
             )
             
             # Upload voice profile to correct bucket path
             self.upload_to_firebase(
                 profile_path, 
-                f"audio/voices/{language}/profiles/{voice_id}.npy",
+                f"{base_path}/profiles/{voice_id}.npy",
                 content_type="application/octet-stream"
             )
             
