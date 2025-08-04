@@ -4,6 +4,10 @@ import os
 import tempfile
 import logging
 import numpy as np
+import torchaudio
+import time
+import random
+import string
 
 import librosa
 import torch
@@ -33,7 +37,83 @@ except ImportError:
 REPO_ID = "ResembleAI/chatterbox"
 
 
-
+def generate_unique_voice_id(voice_name: str, length: int = 8, max_attempts: int = 10) -> str:
+    """
+    Generate a unique voice ID with random alphanumeric characters to prevent naming collisions.
+    Checks Firebase to ensure uniqueness.
+    
+    Args:
+        voice_name: The base voice name
+        length: Length of the random alphanumeric suffix (default: 8)
+        max_attempts: Maximum attempts to generate unique ID (default: 10)
+        
+    Returns:
+        Unique voice ID in format: voice_{voice_name}_{random_alphanumeric}
+        
+    Example:
+        generate_unique_voice_id("christestclone") -> "voice_christestclone_A7b2K9x1"
+    """
+    from google.cloud import storage
+    
+    # Initialize Firebase client
+    try:
+        storage_client = storage.Client()
+        bucket = storage_client.bucket("godnathistorie-a25fa.firebasestorage.app")
+        logger.info("✅ Firebase client initialized for uniqueness check")
+    except Exception as e:
+        logger.warning(f"⚠️ Could not initialize Firebase client: {e}")
+        logger.warning("⚠️ Proceeding without uniqueness check")
+        bucket = None
+    
+    for attempt in range(max_attempts):
+        # Generate random alphanumeric suffix (letters + numbers)
+        random_suffix = ''.join(random.choices(string.ascii_letters + string.digits, k=length))
+        
+        # Create voice ID
+        voice_id = f"voice_{voice_name}_{random_suffix}"
+        
+        # Check if this voice_id already exists in Firebase
+        if bucket is not None:
+            try:
+                # Check in all language folders for existing profiles
+                languages = ['en', 'es', 'fr', 'de', 'it', 'pt', 'ru', 'ja', 'ko', 'zh']  # Add more as needed
+                exists = False
+                
+                for lang in languages:
+                    # Check regular profiles
+                    profile_path = f"audio/voices/{lang}/profiles/{voice_id}.npy"
+                    blob = bucket.blob(profile_path)
+                    if blob.exists():
+                        logger.info(f"🔄 Voice ID {voice_id} already exists in {lang}/profiles, retrying...")
+                        exists = True
+                        break
+                    
+                    # Check kids profiles
+                    kids_profile_path = f"audio/voices/{lang}/kids/profiles/{voice_id}.npy"
+                    kids_blob = bucket.blob(kids_profile_path)
+                    if kids_blob.exists():
+                        logger.info(f"🔄 Voice ID {voice_id} already exists in {lang}/kids/profiles, retrying...")
+                        exists = True
+                        break
+                
+                if not exists:
+                    logger.info(f"✅ Generated unique voice ID: {voice_id}")
+                    return voice_id
+                    
+            except Exception as e:
+                logger.warning(f"⚠️ Error checking Firebase uniqueness: {e}")
+                logger.info(f"✅ Generated voice ID (no uniqueness check): {voice_id}")
+                return voice_id
+        else:
+            # No Firebase check available, return the generated ID
+            logger.info(f"✅ Generated voice ID (no uniqueness check): {voice_id}")
+            return voice_id
+    
+    # If we've exhausted all attempts, add timestamp to ensure uniqueness
+    timestamp = str(int(time.time()))[-6:]  # Last 6 digits of timestamp
+    voice_id = f"voice_{voice_name}_{random_suffix}_{timestamp}"
+    logger.warning(f"⚠️ Exhausted uniqueness attempts, using timestamp: {voice_id}")
+    return voice_id
 
 
 class ChatterboxVC:
@@ -542,14 +622,14 @@ class ChatterboxVC:
             # Return the path as fallback
             return f"https://storage.googleapis.com/godnathistorie-a25fa.firebasestorage.app/{destination_blob_name}"
 
-    def create_voice_clone(self, audio_file_path: str, voice_id: str, voice_name: str = None, metadata: Dict = None) -> Dict:
+    def create_voice_clone(self, audio_file_path: str, voice_id: str = None, voice_name: str = None, metadata: Dict = None) -> Dict:
         """
         Create voice clone from audio file.
         
         Args:
             audio_file_path: Path to the audio file
-            voice_id: Unique voice identifier
-            voice_name: Optional voice name
+            voice_id: Unique voice identifier (optional, will generate if not provided)
+            voice_name: Voice name (required if voice_id not provided)
             metadata: Optional metadata
             
         Returns:
@@ -557,6 +637,12 @@ class ChatterboxVC:
         """
         import time
         start_time = time.time()
+        
+        # Generate voice_id if not provided
+        if voice_id is None:
+            if voice_name is None:
+                raise ValueError("Either voice_id or voice_name must be provided")
+            voice_id = generate_unique_voice_id(voice_name)
         
         logger.info(f"🎤 ChatterboxVC.create_voice_clone called")
         logger.info(f"  - audio_file_path: {audio_file_path}")
@@ -701,3 +787,6 @@ class ChatterboxVC:
         except Exception as e:
             logger.error(f"❌ Failed to generate voice sample: {e}")
             raise
+
+
+
