@@ -496,6 +496,52 @@ class ChatterboxVC:
     # ------------------------------------------------------------------
     # Voice Cloning Pipeline
     # ------------------------------------------------------------------
+    def upload_to_firebase(self, file_path: str, destination_blob_name: str, content_type: str = "application/octet-stream", metadata: dict = None) -> str:
+        """
+        Upload a file to Firebase Storage
+        
+        :param file_path: Path to the file to upload
+        :param destination_blob_name: Destination path in Firebase
+        :param content_type: MIME type of the file
+        :param metadata: Optional metadata to store with the file
+        :return: Public URL
+        """
+        try:
+            from google.cloud import storage
+            
+            # Initialize Firebase storage client
+            storage_client = storage.Client()
+            bucket = storage_client.bucket("godnathistorie-a25fa.firebasestorage.app")
+            
+            logger.info(f"🔍 Starting Firebase upload: {destination_blob_name}")
+            
+            # Read file data
+            with open(file_path, 'rb') as f:
+                data = f.read()
+            
+            # Create blob and upload
+            blob = bucket.blob(destination_blob_name)
+            
+            # Set metadata if provided
+            if metadata:
+                blob.metadata = metadata
+            
+            # Upload the data
+            blob.upload_from_string(data, content_type=content_type)
+            
+            # Make the blob publicly accessible
+            blob.make_public()
+            
+            public_url = blob.public_url
+            logger.info(f"✅ Uploaded to Firebase: {destination_blob_name} -> {public_url}")
+            
+            return public_url
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to upload to Firebase: {e}")
+            # Return the path as fallback
+            return f"https://storage.googleapis.com/godnathistorie-a25fa.firebasestorage.app/{destination_blob_name}"
+
     def create_voice_clone(self, audio_file_path: str, voice_id: str, voice_name: str = None, metadata: Dict = None) -> Dict:
         """
         Create voice clone from audio file.
@@ -507,7 +553,7 @@ class ChatterboxVC:
             metadata: Optional metadata
             
         Returns:
-            Dict with status, voice_id, profile_path, sample_path, generation_time
+            Dict with status, voice_id, profile_path, recorded_audio_path, sample_audio_path, generation_time
         """
         import time
         start_time = time.time()
@@ -535,29 +581,71 @@ class ChatterboxVC:
             sample_audio = self.generate(audio_file_path)
             logger.info(f"    - Sample audio generated, shape: {sample_audio.shape}")
             
-            # Step 4: Convert to MP3
-            logger.info(f"  - Step 4: Converting to MP3...")
+            # Step 4: Convert sample to MP3 and save
+            logger.info(f"  - Step 4: Converting sample to MP3...")
             sample_mp3_bytes = self.tensor_to_mp3_bytes(sample_audio, self.sr, "96k")
-            sample_path = f"{voice_id}_recorded.mp3"
+            sample_audio_path = f"{voice_id}_sample.mp3"
             
             # Save sample to file
-            with open(sample_path, 'wb') as f:
+            with open(sample_audio_path, 'wb') as f:
                 f.write(sample_mp3_bytes)
+            logger.info(f"    - Sample audio saved: {sample_audio_path}")
+            
+            # Step 5: Convert original audio to MP3 and save
+            logger.info(f"  - Step 5: Converting original audio to MP3...")
+            recorded_audio_path = f"{voice_id}_recorded.mp3"
+            self.convert_audio_file_to_mp3(audio_file_path, recorded_audio_path, "160k")
+            logger.info(f"    - Recorded audio saved: {recorded_audio_path}")
             
             generation_time = time.time() - start_time
             
-            # Return success response
+            # Upload files to Firebase
+            logger.info(f"  - Uploading files to Firebase...")
+            
+            # Get language from metadata or default to 'en'
+            language = (metadata or {}).get('language', 'en')
+            logger.info(f"    - Using language: {language}")
+            
+            # Upload sample audio to correct bucket path
+            sample_audio_url = self.upload_to_firebase(
+                sample_audio_path, 
+                f"audio/voices/{language}/samples/{voice_id}_sample.mp3",
+                content_type="audio/mpeg"
+            )
+            
+            # Upload recorded audio to correct bucket path
+            recorded_audio_url = self.upload_to_firebase(
+                recorded_audio_path, 
+                f"audio/voices/{language}/recorded/{voice_id}_recorded.mp3",
+                content_type="audio/mpeg"
+            )
+            
+            # Upload voice profile to correct bucket path
+            profile_url = self.upload_to_firebase(
+                profile_path, 
+                f"audio/voices/{language}/profiles/{voice_id}.npy",
+                content_type="application/octet-stream"
+            )
+            
+            # Return JSON-serializable response
             result = {
                 "status": "success",
                 "voice_id": voice_id,
                 "profile_path": profile_path,
-                "sample_path": sample_path,
-                "generation_time": generation_time
+                "recorded_audio_path": recorded_audio_path,
+                "sample_audio_path": sample_audio_path,
+                "generation_time": generation_time,
+                "metadata": metadata or {},
+                "sample_audio_url": sample_audio_url,
+                "recorded_audio_url": recorded_audio_url,
+                "profile_url": profile_url,
+                "language": language
             }
             
             logger.info(f"✅ Voice clone created successfully!")
             logger.info(f"  - Profile path: {profile_path}")
-            logger.info(f"  - Sample path: {sample_path}")
+            logger.info(f"  - Recorded audio path: {recorded_audio_path}")
+            logger.info(f"  - Sample audio path: {sample_audio_path}")
             logger.info(f"  - Generation time: {generation_time:.2f}s")
             
             return result
