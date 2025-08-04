@@ -496,73 +496,84 @@ class ChatterboxVC:
     # ------------------------------------------------------------------
     # Voice Cloning Pipeline
     # ------------------------------------------------------------------
-    def create_voice_clone(self, audio_file_path: str, voice_id: str, voice_name: str = None, output_dir: str = None, metadata: Dict = None, **kwargs) -> Dict:
+    def create_voice_clone(self, audio_file_path: str, voice_id: str, voice_name: str = None, metadata: Dict = None) -> Dict:
         """
-        Simple voice cloning using the original working approach.
+        Create voice clone from audio file.
+        
+        Args:
+            audio_file_path: Path to the audio file
+            voice_id: Unique voice identifier
+            voice_name: Optional voice name
+            metadata: Optional metadata
+            
+        Returns:
+            Dict with status, voice_id, profile_path, sample_path, generation_time
         """
+        import time
+        start_time = time.time()
+        
         logger.info(f"🎤 ChatterboxVC.create_voice_clone called")
         logger.info(f"  - audio_file_path: {audio_file_path}")
         logger.info(f"  - voice_id: {voice_id}")
+        logger.info(f"  - voice_name: {voice_name}")
+        logger.info(f"  - metadata: {metadata}")
         
         try:
-            # Step 1: Set the target voice (this creates the voice profile internally)
-            logger.info(f"  - Step 1: Setting target voice...")
-            self.set_target_voice(audio_file_path)
-            logger.info(f"    - Target voice set successfully")
+            # Step 1: Save voice profile from audio
+            logger.info(f"  - Step 1: Saving voice profile...")
+            profile_path = f"{voice_id}.npy"
+            self.save_voice_profile(audio_file_path, profile_path)
+            logger.info(f"    - Voice profile saved: {profile_path}")
             
-            # Step 2: Generate a sample using the original generate method
-            logger.info(f"  - Step 2: Generating voice sample...")
+            # Step 2: Set voice profile
+            logger.info(f"  - Step 2: Setting voice profile...")
+            self.set_voice_profile(profile_path)
+            logger.info(f"    - Voice profile set successfully")
+            
+            # Step 3: Generate sample audio
+            logger.info(f"  - Step 3: Generating sample audio...")
             sample_audio = self.generate(audio_file_path)
             logger.info(f"    - Sample audio generated, shape: {sample_audio.shape}")
             
-            # Step 3: Convert to MP3 bytes
-            logger.info(f"  - Step 3: Converting to MP3...")
+            # Step 4: Convert to MP3
+            logger.info(f"  - Step 4: Converting to MP3...")
             sample_mp3_bytes = self.tensor_to_mp3_bytes(sample_audio, self.sr, "96k")
-            logger.info(f"    - MP3 bytes size: {len(sample_mp3_bytes)}")
+            sample_path = f"{voice_id}_recorded.mp3"
             
-            # Step 4: Convert original audio to MP3
-            logger.info(f"  - Step 4: Converting original audio...")
-            if output_dir:
-                recorded_mp3_path = Path(output_dir) / f"{voice_id}_recorded.mp3"
-            else:
-                recorded_mp3_path = Path(f"{voice_id}_recorded.mp3")
+            # Save sample to file
+            with open(sample_path, 'wb') as f:
+                f.write(sample_mp3_bytes)
             
-            self.convert_audio_file_to_mp3(audio_file_path, str(recorded_mp3_path), "160k")
+            generation_time = time.time() - start_time
             
-            # Read recorded MP3 bytes
-            with open(recorded_mp3_path, 'rb') as f:
-                recorded_mp3_bytes = f.read()
-            
-            # Clean up temporary MP3 file
-            if recorded_mp3_path.exists():
-                os.unlink(recorded_mp3_path)
-            
-            # Return result
+            # Return success response
             result = {
-                "voice_id": voice_id,
                 "status": "success",
-                "sample_audio_bytes": sample_mp3_bytes,
-                "recorded_audio_bytes": recorded_mp3_bytes,
-                "message": "Voice clone created successfully"
+                "voice_id": voice_id,
+                "profile_path": profile_path,
+                "sample_path": sample_path,
+                "generation_time": generation_time
             }
             
             logger.info(f"✅ Voice clone created successfully!")
-            logger.info(f"  - Sample audio size: {len(sample_mp3_bytes)} bytes")
-            logger.info(f"  - Recorded audio size: {len(recorded_mp3_bytes)} bytes")
+            logger.info(f"  - Profile path: {profile_path}")
+            logger.info(f"  - Sample path: {sample_path}")
+            logger.info(f"  - Generation time: {generation_time:.2f}s")
             
             return result
             
         except Exception as e:
+            generation_time = time.time() - start_time
             logger.error(f"❌ ChatterboxVC.create_voice_clone failed: {e}")
             logger.error(f"  - Exception type: {type(e).__name__}")
             import traceback
             logger.error(f"  - Full traceback: {traceback.format_exc()}")
             
             return {
-                "voice_id": voice_id,
                 "status": "error",
+                "voice_id": voice_id,
                 "error": str(e),
-                "message": "Voice clone creation failed"
+                "generation_time": generation_time
             }
 
     def generate_voice_sample(self, voice_profile_path: str, text: str = None) -> Tuple[torch.Tensor, bytes]:

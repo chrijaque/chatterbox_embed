@@ -875,31 +875,54 @@ class ChatterboxTTS:
             # Return the path as fallback
             return f"https://storage.googleapis.com/godnathistorie-a25fa.firebasestorage.app/{destination_blob_name}"
 
-    def generate_tts_story(self, text: str, voice_profile_path: str, voice_id: str, 
+    def generate_tts_story(self, text: str, voice_id: str, profile_base64: str, 
                           language: str = 'en', story_type: str = 'user', 
-                          is_kids_voice: bool = False, metadata: Dict = None) -> Dict:
+                          is_kids_voice: bool = False) -> Dict:
         """
-        Complete TTS pipeline: generate long text, convert to MP3, upload to Firebase.
+        Generate TTS story with voice profile from base64.
         
-        :param text: Text to synthesize
-        :param voice_profile_path: Path to voice profile
-        :param voice_id: Unique voice identifier
-        :param language: Language code
-        :param story_type: Type of story
-        :param is_kids_voice: Whether it's a kids voice
-        :param metadata: Additional metadata
-        :return: Dictionary with TTS results
+        Args:
+            text: Text to synthesize
+            voice_id: Unique voice identifier
+            profile_base64: Voice profile as base64 string
+            language: Language code
+            story_type: Type of story
+            is_kids_voice: Whether it's a kids voice
+            
+        Returns:
+            Dict with status, audio_data, and generation_time
         """
+        import time
+        import base64
+        import tempfile
+        import os
+        
+        start_time = time.time()
+        
         logger.info(f"📚 ChatterboxTTS.generate_tts_story called")
         logger.info(f"  - text length: {len(text)}")
-        logger.info(f"  - voice_profile_path: {voice_profile_path}")
         logger.info(f"  - voice_id: {voice_id}")
+        logger.info(f"  - language: {language}")
+        logger.info(f"  - story_type: {story_type}")
+        logger.info(f"  - is_kids_voice: {is_kids_voice}")
         
         try:
-            # Generate long text audio
+            # Step 1: Load voice profile from base64
+            logger.info(f"  - Step 1: Loading voice profile from base64...")
+            profile_bytes = base64.b64decode(profile_base64)
+            
+            # Save to temporary file
+            with tempfile.NamedTemporaryFile(suffix=".npy", delete=False) as temp_file:
+                temp_file.write(profile_bytes)
+                temp_profile_path = temp_file.name
+            
+            logger.info(f"    - Voice profile loaded from base64")
+            
+            # Step 2: Generate TTS audio
+            logger.info(f"  - Step 2: Generating TTS audio...")
             audio_tensor, sample_rate, generation_metadata = self.generate_long_text(
                 text=text,
-                voice_profile_path=voice_profile_path,
+                voice_profile_path=temp_profile_path,
                 output_path="./temp_tts_output.wav",
                 max_chars=500,
                 pause_ms=150,
@@ -908,72 +931,40 @@ class ChatterboxTTS:
                 cfg_weight=0.5
             )
             
-            # Convert to MP3 bytes (use VC's method if available, otherwise fallback)
-            try:
-                # Try to use VC's method if available
-                from .vc import ChatterboxVC
-                vc_model = ChatterboxVC.from_pretrained(device=self.device)
-                mp3_bytes = vc_model.tensor_to_mp3_bytes(audio_tensor, sample_rate, "96k")
-                logger.info("  - Used VC's tensor_to_mp3_bytes method")
-            except Exception as e:
-                logger.warning(f"  - Failed to use VC's method: {e}, using fallback")
-                # Fallback to WAV bytes
-                import tempfile
-                import os
-                temp_wav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-                torchaudio.save(temp_wav.name, audio_tensor, sample_rate)
-                with open(temp_wav.name, 'rb') as f:
-                    mp3_bytes = f.read()
-                os.unlink(temp_wav.name)
+            # Step 3: Convert to MP3 bytes
+            logger.info(f"  - Step 3: Converting to MP3...")
+            mp3_bytes = self.tensor_to_mp3_bytes(audio_tensor, sample_rate, "96k")
             
-            # Create Firebase path
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            firebase_path = f"voices/{language}/samples/{voice_id}_sample_{timestamp}.mp3"
+            # Convert to base64
+            audio_base64 = base64.b64encode(mp3_bytes).decode('utf-8')
             
-            # Upload to Firebase
-            firebase_url = self.upload_to_firebase(
-                mp3_bytes,
-                firebase_path,
-                content_type="audio/mpeg",
-                metadata={
-                    "voice_id": voice_id,
-                    "language": language,
-                    "story_type": story_type,
-                    "is_kids_voice": is_kids_voice,
-                    "text_length": len(text),
-                    "audio_duration": audio_tensor.shape[1] / sample_rate,
-                    "sample_rate": sample_rate,
-                    **(metadata or {})
-                }
-            )
+            # Clean up temporary file
+            os.unlink(temp_profile_path)
             
-            # Return comprehensive results
+            generation_time = time.time() - start_time
+            
+            # Return result
             result = {
-                "voice_id": voice_id,
-                "firebase_url": firebase_url,
-                "audio_bytes": mp3_bytes,
-                "audio_size": len(mp3_bytes),
-                "audio_tensor_shape": list(audio_tensor.shape),
-                "sample_rate": sample_rate,
-                "text_length": len(text),
-                "language": language,
-                "story_type": story_type,
-                "is_kids_voice": is_kids_voice,
-                "generation_metadata": generation_metadata,
-                "status": "success"
+                "status": "success",
+                "audio_data": audio_base64,
+                "generation_time": generation_time
             }
             
-            logger.info(f"✅ ChatterboxTTS.generate_tts_story completed successfully")
-            logger.info(f"  - Firebase URL: {firebase_url}")
+            logger.info(f"✅ TTS story generated successfully!")
+            logger.info(f"  - Audio size: {len(mp3_bytes)} bytes")
+            logger.info(f"  - Generation time: {generation_time:.2f}s")
+            
             return result
             
         except Exception as e:
+            generation_time = time.time() - start_time
             logger.error(f"❌ ChatterboxTTS.generate_tts_story failed: {e}")
             logger.error(f"  - Exception type: {type(e).__name__}")
             import traceback
             logger.error(f"  - Full traceback: {traceback.format_exc()}")
+            
             return {
-                "voice_id": voice_id,
                 "status": "error",
-                "error": str(e)
+                "error": str(e),
+                "generation_time": generation_time
             }
