@@ -16,7 +16,7 @@ from .models.s3tokenizer import S3_SR
 from .models.s3gen import S3GEN_SR, S3Gen, VoiceProfile
 from .models.voice_encoder import VoiceEncoder
 from .models.t3 import T3
-from .models.tokenizer import EnTokenizer
+from .models.tokenizers.tokenizer import EnTokenizer
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -36,25 +36,61 @@ REPO_ID = "ResembleAI/chatterbox"
 class T3TextEncoder:
     """
     Wrapper for T3 model that provides the expected interface for s3gen.
-    This wrapper converts simple text input into the complex T3 input format.
+    Uses the actual voice profile embedding from ChatterboxVC.ref_dict.
     """
     
-    def __init__(self, t3_model: T3, tokenizer: EnTokenizer):
+    def __init__(self, t3_model: T3, tokenizer: EnTokenizer, vc_instance=None):
         self.t3 = t3_model
         self.tokenizer = tokenizer
+        self.vc_instance = vc_instance  # Reference to ChatterboxVC instance
         
     def encode(self, text: str) -> torch.Tensor:
         """
         Encode text into speech tokens using T3 model.
-        This provides the interface that s3gen expects.
+        Uses the actual voice profile embedding if available.
         """
+        import torch
+        from .models.t3.modules.cond_enc import T3Cond
+        
         # Tokenize the text
         text_tokens = self.tokenizer.encode(text)
         text_tokens = torch.tensor(text_tokens, dtype=torch.long).unsqueeze(0)  # Add batch dimension
         
-        # Create dummy conditioning (empty for now)
-        from .models.t3.modules.cond_enc import T3Cond
-        t3_cond = T3Cond()
+        # Add start and stop tokens as required by T3
+        start_token = torch.tensor([[255]], dtype=torch.long, device=text_tokens.device)  # start_text_token
+        stop_token = torch.tensor([[0]], dtype=torch.long, device=text_tokens.device)     # stop_text_token
+        
+        text_tokens = torch.cat([start_token, text_tokens, stop_token], dim=1)
+        
+        # Use actual voice profile embedding if available
+        if (self.vc_instance and 
+            hasattr(self.vc_instance, 'ref_dict') and 
+            self.vc_instance.ref_dict and 
+            'embedding' in self.vc_instance.ref_dict):
+            
+            # ✅ Use real voice profile embedding
+            original_emb = self.vc_instance.ref_dict['embedding']
+            
+            # Resize embedding to match T3's expected size (256)
+            if original_emb.shape[-1] != 256:
+                logger.info(f"🎤 Resizing speaker embedding from {original_emb.shape[-1]} to 256")
+                if original_emb.dim() == 1:
+                    original_emb = original_emb.unsqueeze(0)  # Add batch dimension
+                
+                # Create a simple linear projection to resize
+                resize_layer = torch.nn.Linear(original_emb.shape[-1], 256, bias=False).to(self.t3.device)
+                speaker_emb = resize_layer(original_emb)
+            else:
+                speaker_emb = original_emb
+                
+            logger.info(f"🎤 Using real voice profile embedding (size: {speaker_emb.shape})")
+        else:
+            # ⚠️ Fallback to dummy embedding (should not happen in production)
+            speaker_emb = torch.zeros(1, 256, device=self.t3.device)
+            logger.warning(f"⚠️ No voice profile available, using dummy embedding")
+        
+        emotion_adv = torch.tensor(0.5, device=self.t3.device)
+        t3_cond = T3Cond(speaker_emb=speaker_emb, emotion_adv=emotion_adv)
         
         # Use T3's inference method to generate speech tokens
         speech_tokens = self.t3.inference(
@@ -65,6 +101,9 @@ class T3TextEncoder:
             do_sample=True,
             stop_on_eos=True
         )
+        
+        # Clamp tokens to valid range for S3Gen (SPEECH_VOCAB_SIZE = 6561)
+        speech_tokens = torch.clamp(speech_tokens, 0, 6560)
         
         return speech_tokens.squeeze(0)  # Remove batch dimension
 
@@ -180,7 +219,7 @@ class ChatterboxVC:
 
         # Create T3TextEncoder wrapper and attach to S3Gen (required for TTS)
         logger.info(f"  - Creating T3TextEncoder wrapper...")
-        text_encoder = T3TextEncoder(t3, tokenizer)
+        text_encoder = T3TextEncoder(t3, tokenizer, vc_instance=None)  # Will be set after VC instance creation
         s3gen.text_encoder = text_encoder
         logger.info(f"  - T3TextEncoder wrapper attached to S3Gen")
             
@@ -195,6 +234,12 @@ class ChatterboxVC:
 
         logger.info(f"  - Creating ChatterboxVC instance...")
         result = cls(s3gen, device, ref_dict=ref_dict)
+        
+        # Set the VC instance reference in the T3TextEncoder
+        if hasattr(result.s3gen, 'text_encoder') and hasattr(result.s3gen.text_encoder, 'vc_instance'):
+            result.s3gen.text_encoder.vc_instance = result
+            logger.info(f"  - VC instance reference set in T3TextEncoder")
+        
         logger.info(f"✅ ChatterboxVC.from_local completed")
         return result
 
@@ -432,6 +477,8 @@ class ChatterboxVC:
             logger.info(f"    - ref_dict created with {len(self.ref_dict)} keys")
             logger.info(f"    - ref_dict keys: {list(self.ref_dict.keys())}")
             
+
+            
             logger.info(f"✅ ChatterboxVC.set_voice_profile completed successfully")
             
         except Exception as e:
@@ -548,20 +595,16 @@ class ChatterboxVC:
     # ------------------------------------------------------------------
     def create_voice_clone(self, audio_file_path: str, voice_id: str, voice_name: str = None, output_dir: str = None, metadata: Dict = None, **kwargs) -> Dict:
         """
-        Complete voice cloning pipeline: create profile, generate sample, and return metadata.
-        
-        :param audio_file_path: Path to the reference audio file
-        :param voice_id: Unique identifier for the voice
-        :param voice_name: Optional display name for the voice
-        :param output_dir: Directory to save outputs (optional)
-        :param metadata: Optional metadata from API app (name, language, is_kids_voice, etc.)
-        :return: Dictionary with voice clone information
+        Complete voice cloning pipeline:
+        1. Convert voice recording to voice profile
+        2. Save voice profile and recorded audio to Firebase
+        3. Use voice profile to generate voice sample
+        4. Save voice sample to Firebase
         """
         logger.info(f"🎤 ChatterboxVC.create_voice_clone called")
         logger.info(f"  - audio_file_path: {audio_file_path}")
         logger.info(f"  - voice_id: {voice_id}")
         logger.info(f"  - voice_name: {voice_name}")
-        logger.info(f"  - output_dir: {output_dir}")
         logger.info(f"  - metadata: {metadata}")
         
         # Use provided metadata or defaults
@@ -569,95 +612,89 @@ class ChatterboxVC:
             metadata = {}
         
         if voice_name is not None:
-            logger.info(f"  - Using provided voice_name: {voice_name}")
             voice_name = voice_name
         else:
             voice_name = metadata.get('name', voice_id.replace('voice_', ''))
-            logger.info(f"  - Using default voice_name: {voice_name}")
         
         language = metadata.get('language', 'en')
         is_kids_voice = metadata.get('is_kids_voice', False)
         custom_template = metadata.get('template_message')
         
-        logger.info(f"  - Extracted metadata:")
-        logger.info(f"    - voice_name: {voice_name}")
-        logger.info(f"    - language: {language}")
-        logger.info(f"    - is_kids_voice: {is_kids_voice}")
-        logger.info(f"    - custom_template: {custom_template is not None}")
-        
         try:
-            # Step 1: Create voice profile
-            logger.info(f"  - Step 1: Creating voice profile...")
+            # Step 1: Convert voice recording to voice profile
+            logger.info(f"  - Step 1: Converting voice recording to voice profile...")
             if output_dir:
                 profile_path = Path(output_dir) / f"{voice_id}.npy"
             else:
                 profile_path = Path(f"{voice_id}.npy")
             
-            logger.info(f"    - profile_path: {profile_path}")
             self.save_voice_profile(audio_file_path, str(profile_path))
-            logger.info(f"    - Voice profile created successfully")
+            logger.info(f"    - Voice profile created: {profile_path}")
             
-            # Step 2: Generate voice sample
-            logger.info(f"  - Step 2: Generating voice sample...")
-            if custom_template:
-                template_message = custom_template
-            else:
-                template_message = f"Hello, this is the voice clone of {voice_name}. This voice is used to narrate whimsical stories and fairytales."
+            # Step 2: Save voice profile and recorded audio to Firebase
+            logger.info(f"  - Step 2: Preparing files for Firebase upload...")
             
-            logger.info(f"    - template_message: {template_message[:100]}...")
-            
-            # Set the voice profile for generation
-            logger.info(f"    - Setting voice profile...")
-            self.set_voice_profile(str(profile_path))
-            
-            # Generate sample audio
-            logger.info(f"    - Generating TTS audio...")
-            audio_tensor = self.tts(template_message)
-            logger.info(f"    - Audio tensor shape: {audio_tensor.shape}")
-            
-            # Convert to MP3 bytes
-            logger.info(f"    - Converting to MP3...")
-            sample_mp3_bytes = self.tensor_to_mp3_bytes(audio_tensor, self.sr, "96k")
-            logger.info(f"    - MP3 bytes size: {len(sample_mp3_bytes)}")
-            
-            # Step 3: Convert original audio to MP3
-            logger.info(f"  - Step 3: Converting original audio...")
+            # Convert original audio to MP3
             if output_dir:
                 recorded_mp3_path = Path(output_dir) / f"{voice_id}_recorded.mp3"
             else:
                 recorded_mp3_path = Path(f"{voice_id}_recorded.mp3")
             
-            logger.info(f"    - recorded_mp3_path: {recorded_mp3_path}")
             self.convert_audio_file_to_mp3(audio_file_path, str(recorded_mp3_path), "160k")
             
             # Read recorded MP3 bytes
-            logger.info(f"    - Reading recorded MP3 bytes...")
             with open(recorded_mp3_path, 'rb') as f:
                 recorded_mp3_bytes = f.read()
-            logger.info(f"    - Recorded MP3 bytes size: {len(recorded_mp3_bytes)}")
+            
+            # Read voice profile bytes
+            with open(profile_path, 'rb') as f:
+                profile_bytes = f.read()
             
             # Clean up temporary MP3 file
-            logger.info(f"    - Cleaning up temporary file...")
             if recorded_mp3_path.exists():
                 os.unlink(recorded_mp3_path)
             
-            # Return comprehensive metadata
+            # Step 3: Use voice profile to generate voice sample
+            logger.info(f"  - Step 3: Generating voice sample...")
+            self.set_voice_profile(str(profile_path))
+            
+            # Use custom template or default
+            if custom_template:
+                template_message = custom_template
+            else:
+                template_message = f"Hello, this is the voice clone of {voice_name}. This voice is used to narrate whimsical stories and fairytales."
+            
+            logger.info(f"    - Template message: {template_message[:100]}...")
+            
+            # Generate sample audio using TTS
+            sample_audio = self.tts(template_message)
+            logger.info(f"    - Sample audio generated, shape: {sample_audio.shape}")
+            
+            # Convert to MP3 bytes
+            sample_mp3_bytes = self.tensor_to_mp3_bytes(sample_audio, self.sr, "96k")
+            logger.info(f"    - Sample MP3 bytes size: {len(sample_mp3_bytes)}")
+            
+            # Step 4: Return all data for Firebase upload
             result = {
                 "voice_id": voice_id,
-                "profile_path": str(profile_path),
-                "profile_exists": profile_path.exists(),
-                "sample_audio_bytes": sample_mp3_bytes,
+                "status": "success",
+                "voice_profile_bytes": profile_bytes,
                 "recorded_audio_bytes": recorded_mp3_bytes,
-                "sample_audio_size": len(sample_mp3_bytes),
-                "recorded_audio_size": len(recorded_mp3_bytes),
-                "audio_tensor_shape": list(audio_tensor.shape),
-                "sample_rate": self.sr,
-                "template_message": template_message,
-                "status": "success"
+                "sample_audio_bytes": sample_mp3_bytes,
+                "metadata": {
+                    "voice_name": voice_name,
+                    "language": language,
+                    "is_kids_voice": is_kids_voice,
+                    "template_message": template_message
+                },
+                "message": "Voice clone created successfully"
             }
             
-            logger.info(f"✅ ChatterboxVC.create_voice_clone completed successfully")
-            logger.info(f"  - Result keys: {list(result.keys())}")
+            logger.info(f"✅ Voice clone pipeline completed!")
+            logger.info(f"  - Voice profile size: {len(profile_bytes)} bytes")
+            logger.info(f"  - Recorded audio size: {len(recorded_mp3_bytes)} bytes")
+            logger.info(f"  - Sample audio size: {len(sample_mp3_bytes)} bytes")
+            
             return result
             
         except Exception as e:
@@ -665,10 +702,12 @@ class ChatterboxVC:
             logger.error(f"  - Exception type: {type(e).__name__}")
             import traceback
             logger.error(f"  - Full traceback: {traceback.format_exc()}")
+            
             return {
                 "voice_id": voice_id,
                 "status": "error",
-                "error": str(e)
+                "error": str(e),
+                "message": "Voice clone creation failed"
             }
 
     def generate_voice_sample(self, voice_profile_path: str, text: str = None) -> Tuple[torch.Tensor, bytes]:
