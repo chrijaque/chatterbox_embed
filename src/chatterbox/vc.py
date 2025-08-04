@@ -33,6 +33,42 @@ except ImportError:
 REPO_ID = "ResembleAI/chatterbox"
 
 
+class T3TextEncoder:
+    """
+    Wrapper for T3 model that provides the expected interface for s3gen.
+    This wrapper converts simple text input into the complex T3 input format.
+    """
+    
+    def __init__(self, t3_model: T3, tokenizer: EnTokenizer):
+        self.t3 = t3_model
+        self.tokenizer = tokenizer
+        
+    def encode(self, text: str) -> torch.Tensor:
+        """
+        Encode text into speech tokens using T3 model.
+        This provides the interface that s3gen expects.
+        """
+        # Tokenize the text
+        text_tokens = self.tokenizer.encode(text)
+        text_tokens = torch.tensor(text_tokens, dtype=torch.long).unsqueeze(0)  # Add batch dimension
+        
+        # Create dummy conditioning (empty for now)
+        from .models.t3.modules.cond_enc import T3Cond
+        t3_cond = T3Cond()
+        
+        # Use T3's inference method to generate speech tokens
+        speech_tokens = self.t3.inference(
+            t3_cond=t3_cond,
+            text_tokens=text_tokens,
+            max_new_tokens=512,  # Adjust as needed
+            temperature=0.8,
+            do_sample=True,
+            stop_on_eos=True
+        )
+        
+        return speech_tokens.squeeze(0)  # Remove batch dimension
+
+
 class ChatterboxVC:
     ENC_COND_LEN = 6 * S3_SR
     DEC_COND_LEN = 10 * S3GEN_SR
@@ -135,17 +171,18 @@ class ChatterboxVC:
         s3gen.to(device).eval()
         logger.info(f"  - S3Gen model loaded and moved to {device}")
 
-        # Attach T3 as text_encoder to S3Gen (required for TTS)
-        logger.info(f"  - Attaching T3 as text_encoder to S3Gen...")
-        s3gen.text_encoder = t3
-        logger.info(f"  - T3 text_encoder attached to S3Gen")
-
         # Load tokenizer
         logger.info(f"  - Loading tokenizer...")
         tokenizer = EnTokenizer(
             str(ckpt_dir / "tokenizer.json")
         )
         logger.info(f"  - Tokenizer loaded")
+
+        # Create T3TextEncoder wrapper and attach to S3Gen (required for TTS)
+        logger.info(f"  - Creating T3TextEncoder wrapper...")
+        text_encoder = T3TextEncoder(t3, tokenizer)
+        s3gen.text_encoder = text_encoder
+        logger.info(f"  - T3TextEncoder wrapper attached to S3Gen")
             
         ref_dict = None
         if (builtin_voice := ckpt_dir / "conds.pt").exists():
