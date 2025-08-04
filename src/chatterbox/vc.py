@@ -607,21 +607,21 @@ class ChatterboxVC:
             logger.info(f"    - Using language: {language}")
             
             # Upload sample audio to correct bucket path
-            sample_audio_url = self.upload_to_firebase(
+            self.upload_to_firebase(
                 sample_audio_path, 
                 f"audio/voices/{language}/samples/{voice_id}_sample.mp3",
                 content_type="audio/mpeg"
             )
             
             # Upload recorded audio to correct bucket path
-            recorded_audio_url = self.upload_to_firebase(
+            self.upload_to_firebase(
                 recorded_audio_path, 
                 f"audio/voices/{language}/recorded/{voice_id}_recorded.mp3",
                 content_type="audio/mpeg"
             )
             
             # Upload voice profile to correct bucket path
-            profile_url = self.upload_to_firebase(
+            self.upload_to_firebase(
                 profile_path, 
                 f"audio/voices/{language}/profiles/{voice_id}.npy",
                 content_type="application/octet-stream"
@@ -631,14 +631,11 @@ class ChatterboxVC:
             result = {
                 "status": "success",
                 "voice_id": voice_id,
-                "profile_path": profile_path,
-                "recorded_audio_path": recorded_audio_path,
-                "sample_audio_path": sample_audio_path,
+                "profile_path": f"{voice_id}.npy",
+                "recorded_audio_path": f"{voice_id}_recorded.mp3",
+                "sample_audio_path": f"{voice_id}_sample.mp3",
                 "generation_time": generation_time,
                 "metadata": metadata or {},
-                "sample_audio_url": sample_audio_url,
-                "recorded_audio_url": recorded_audio_url,
-                "profile_url": profile_url,
                 "language": language
             }
             
