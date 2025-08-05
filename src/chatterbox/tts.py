@@ -891,7 +891,7 @@ class ChatterboxTTS:
             metadata: Optional metadata (for API compatibility)
             
         Returns:
-            Dict with status, audio_data, and generation_time
+            Dict with status, audio_data, firebase_url, firebase_path, story_type, and generation_time
         """
         import time
         import base64
@@ -937,6 +937,44 @@ class ChatterboxTTS:
             logger.info(f"  - Step 3: Converting to MP3...")
             mp3_bytes = self.tensor_to_mp3_bytes(audio_tensor, sample_rate, "96k")
             
+            # Step 4: Upload to Firebase Storage
+            logger.info(f"  - Step 4: Uploading to Firebase Storage...")
+            
+            # Extract story_type from metadata or use direct parameter
+            final_story_type = story_type  # Start with direct parameter
+            if metadata and isinstance(metadata, dict) and 'story_type' in metadata:
+                final_story_type = metadata['story_type']  # Override with metadata if available
+            
+            # Ensure story_type is valid (user or app)
+            if final_story_type not in ['user', 'app']:
+                logger.warning(f"Invalid story_type '{final_story_type}', defaulting to 'user'")
+                final_story_type = 'user'
+            
+            # Generate Firebase path based on story_type and language
+            firebase_path = f"audio/stories/{language}/{final_story_type}/{voice_id}.mp3"
+            logger.info(f"    - Firebase path: {firebase_path}")
+            logger.info(f"    - Story type: {final_story_type}")
+            
+            # Upload to Firebase
+            try:
+                firebase_url = self.upload_to_firebase(
+                    data=mp3_bytes,
+                    destination_blob_name=firebase_path,
+                    content_type="audio/mpeg",
+                    metadata={
+                        "voice_id": voice_id,
+                        "language": language,
+                        "story_type": final_story_type,
+                        "text_length": len(text),
+                        "generation_time": time.time() - start_time,
+                        "audio_size": len(mp3_bytes)
+                    }
+                )
+                logger.info(f"    - Uploaded successfully: {firebase_url}")
+            except Exception as upload_error:
+                logger.error(f"❌ Firebase upload failed: {upload_error}")
+                firebase_url = None
+            
             # Convert to base64
             audio_base64 = base64.b64encode(mp3_bytes).decode('utf-8')
             
@@ -945,10 +983,13 @@ class ChatterboxTTS:
             
             generation_time = time.time() - start_time
             
-            # Return result
+            # Return result with Firebase URL
             result = {
                 "status": "success",
                 "audio_data": audio_base64,
+                "firebase_url": firebase_url,
+                "firebase_path": firebase_path,
+                "story_type": final_story_type,
                 "generation_time": generation_time
             }
             
