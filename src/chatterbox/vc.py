@@ -8,6 +8,7 @@ import torchaudio
 import time
 import random
 import string
+import scipy.signal
 
 import librosa
 import torch
@@ -16,11 +17,13 @@ import torchaudio
 from huggingface_hub import hf_hub_download
 from safetensors.torch import load_file
 
-from .models.s3tokenizer import S3_SR
+from .models.s3tokenizer import S3_SR, drop_invalid_tokens
 from .models.s3gen import S3GEN_SR, S3Gen, VoiceProfile
 from .models.voice_encoder import VoiceEncoder
 from .models.t3 import T3
 from .models.tokenizers.tokenizer import EnTokenizer
+from .models.t3.modules.cond_enc import T3Cond
+from .tts import punc_norm
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -122,29 +125,44 @@ class ChatterboxVC:
 
     def __init__(
         self,
+        t3,  # Add T3 model
         s3gen: S3Gen,
+        ve,  # Add VoiceEncoder
+        tokenizer,  # Add tokenizer
         device: str,
         ref_dict: dict=None,
     ):
         logger.info(f"🔧 ChatterboxVC.__init__ called")
+        logger.info(f"  - t3 type: {type(t3)}")
         logger.info(f"  - s3gen type: {type(s3gen)}")
+        logger.info(f"  - ve type: {type(ve)}")
+        logger.info(f"  - tokenizer type: {type(tokenizer)}")
         logger.info(f"  - device: {device}")
         logger.info(f"  - ref_dict: {ref_dict is not None}")
         
         self.sr = S3GEN_SR
+        self.t3 = t3
         self.s3gen = s3gen
+        self.ve = ve
+        self.tokenizer = tokenizer
         self.device = device
         self.watermarker = perth.PerthImplicitWatermarker()
         
         if ref_dict is None:
             self.ref_dict = None
+            self.ve_embedding = None
             logger.info(f"  - ref_dict set to None")
         else:
             self.ref_dict = {
                 k: v.to(device) if torch.is_tensor(v) else v
                 for k, v in ref_dict.items()
             }
+            # Extract VoiceEncoder embedding if available
+            self.ve_embedding = ref_dict.get('ve_embedding')
+            if self.ve_embedding is not None and torch.is_tensor(self.ve_embedding):
+                self.ve_embedding = self.ve_embedding.to(device)
             logger.info(f"  - ref_dict set with {len(self.ref_dict)} keys")
+            logger.info(f"  - ve_embedding available: {self.ve_embedding is not None}")
         
         logger.info(f"✅ ChatterboxVC initialized successfully")
         logger.info(f"  - Available methods: {[m for m in dir(self) if not m.startswith('_')]}")
@@ -199,7 +217,15 @@ class ChatterboxVC:
         ve.to(device).eval()
         logger.info(f"  - VoiceEncoder loaded and moved to {device}")
 
-
+        # Load T3 model
+        logger.info(f"  - Loading T3 model...")
+        t3 = T3()
+        t3_state = load_file(ckpt_dir / "t3_cfg.safetensors")
+        if "model" in t3_state.keys():
+            t3_state = t3_state["model"][0]
+        t3.load_state_dict(t3_state)
+        t3.to(device).eval()
+        logger.info(f"  - T3 model loaded and moved to {device}")
 
         # Load S3Gen
         logger.info(f"  - Loading S3Gen model...")
@@ -210,7 +236,12 @@ class ChatterboxVC:
         s3gen.to(device).eval()
         logger.info(f"  - S3Gen model loaded and moved to {device}")
 
-
+        # Load tokenizer
+        logger.info(f"  - Loading tokenizer...")
+        tokenizer = EnTokenizer(
+            str(ckpt_dir / "tokenizer.json")
+        )
+        logger.info(f"  - Tokenizer loaded")
             
         ref_dict = None
         if (builtin_voice := ckpt_dir / "conds.pt").exists():
@@ -222,7 +253,7 @@ class ChatterboxVC:
             logger.info(f"  - No builtin voice found at: {builtin_voice}")
 
         logger.info(f"  - Creating ChatterboxVC instance...")
-        result = cls(s3gen, device, ref_dict=ref_dict)
+        result = cls(t3, s3gen, ve, tokenizer, device, ref_dict=ref_dict)
         logger.info(f"✅ ChatterboxVC.from_local completed")
         return result
 
@@ -251,11 +282,22 @@ class ChatterboxVC:
         return result
 
     def set_target_voice(self, wav_fpath):
+        """Set target voice from audio file path, creating both S3Gen and VoiceEncoder embeddings."""
+        logger.info(f"🎯 ChatterboxVC.set_target_voice called with: {wav_fpath}")
+        
         ## Load reference wav
         s3gen_ref_wav, _sr = librosa.load(wav_fpath, sr=S3GEN_SR)
+        ref_wav_full, orig_sr = librosa.load(wav_fpath, sr=None)
 
         s3gen_ref_wav = s3gen_ref_wav[:self.DEC_COND_LEN]
         self.ref_dict = self.s3gen.embed_ref(s3gen_ref_wav, S3GEN_SR, device=self.device)
+        
+        # Also compute VoiceEncoder embedding for T3 conditioning
+        ref_16k_wav = librosa.resample(ref_wav_full, orig_sr=orig_sr, target_sr=S3_SR)
+        ve_embed = torch.from_numpy(self.ve.embeds_from_wavs([ref_16k_wav], sample_rate=S3_SR))
+        self.ve_embedding = ve_embed.mean(axis=0, keepdim=True).to(self.device)
+        
+        logger.info(f"✅ Target voice set with S3Gen and VoiceEncoder embeddings")
 
 
     def generate(
@@ -289,21 +331,34 @@ class ChatterboxVC:
         text: str,
         *,
         finalize: bool = True,
+        exaggeration: float = 0.5,
+        cfg_weight: float = 0.5,
+        temperature: float = 0.8,
+        repetition_penalty: float = 1.2,
+        min_p: float = 0.05,
+        top_p: float = 1.0,
     ) -> torch.Tensor:
         """
-        Synthesise ``text`` directly using the current voice profile
-        (``self.ref_dict``) without any intermediate audio prompt.
-
-        This leverages the new ``S3Token2Wav.inference_from_text`` helper
-        that was patched into *s3gen.py*.
+        Synthesise text using the proper T3 → S3Gen pipeline with voice profile.
 
         Parameters
         ----------
         text : str
             The text to speak.
         finalize : bool, optional
-            Whether this is the final chunk (affects streaming).  Defaults
-            to ``True`` for one-shot synthesis.
+            Whether this is the final chunk (affects streaming).
+        exaggeration : float
+            Voice exaggeration factor.
+        cfg_weight : float
+            Classifier-free guidance weight.
+        temperature : float
+            Generation temperature.
+        repetition_penalty : float
+            Repetition penalty factor.
+        min_p : float
+            Minimum probability threshold.
+        top_p : float
+            Top-p sampling threshold.
 
         Returns
         -------
@@ -316,27 +371,88 @@ class ChatterboxVC:
         logger.info(f"  - finalize: {finalize}")
         
         if self.ref_dict is None:
-            error_msg = "ChatterboxVC.tts(): no voice profile loaded. Call `set_target_voice()` or construct with `ref_dict`."
+            error_msg = "ChatterboxVC.tts(): no voice profile loaded. Call `set_target_voice()` or `set_voice_profile()`."
             logger.error(f"❌ {error_msg}")
             raise RuntimeError(error_msg)
 
-        # Ensure the S3Gen model has a text encoder attached.
-        if not hasattr(self.s3gen, "text_encoder"):
-            error_msg = "ChatterboxVC.tts(): `self.s3gen` has no `text_encoder`. Attach one with `self.s3gen.text_encoder = my_encoder`."
+        if self.ve_embedding is None:
+            error_msg = "ChatterboxVC.tts(): no VoiceEncoder embedding available. Voice profile missing ve_embedding."
             logger.error(f"❌ {error_msg}")
             raise RuntimeError(error_msg)
 
-        logger.info(f"  - Starting TTS generation...")
+        logger.info(f"  - Starting TTS generation with proper T3 → S3Gen pipeline...")
+        
         with torch.inference_mode():
-            wav = self.s3gen.inference_from_text(
-                text,
+            # Step 1: Prepare T3 conditioning
+            logger.info(f"  - Preparing T3 conditioning...")
+            
+            # Create speech condition prompt tokens if available
+            t3_cond_prompt_tokens = None
+            if plen := self.t3.hp.speech_cond_prompt_len:
+                if 'prompt_token' in self.ref_dict:
+                    # Use prompt tokens from ref_dict, limited to required length
+                    prompt_tokens = self.ref_dict['prompt_token']
+                    if prompt_tokens.shape[1] >= plen:
+                        t3_cond_prompt_tokens = prompt_tokens[:, :plen].to(self.device)
+                    else:
+                        t3_cond_prompt_tokens = prompt_tokens.to(self.device)
+
+            # Create T3 conditioning
+            t3_cond = T3Cond(
+                speaker_emb=self.ve_embedding,
+                cond_prompt_speech_tokens=t3_cond_prompt_tokens,
+                emotion_adv=exaggeration * torch.ones(1, 1, 1).to(self.device),
+            ).to(device=self.device)
+            
+            # Step 2: Process text and tokenize
+            logger.info(f"  - Processing and tokenizing text...")
+            text = punc_norm(text)
+            text_tokens = self.tokenizer.text_to_tokens(text).to(self.device)
+
+            if cfg_weight > 0.0:
+                text_tokens = torch.cat([text_tokens, text_tokens], dim=0)  # Need two seqs for CFG
+
+            sot = self.t3.hp.start_text_token
+            eot = self.t3.hp.stop_text_token
+            text_tokens = torch.nn.functional.pad(text_tokens, (1, 0), value=sot)
+            text_tokens = torch.nn.functional.pad(text_tokens, (0, 1), value=eot)
+            
+            # Step 3: T3 inference (text → speech tokens)
+            logger.info(f"  - T3 inference: text → speech tokens...")
+            speech_tokens = self.t3.inference(
+                t3_cond=t3_cond,
+                text_tokens=text_tokens,
+                max_new_tokens=1000,
+                temperature=temperature,
+                cfg_weight=cfg_weight,
+                repetition_penalty=repetition_penalty,
+                min_p=min_p,
+                top_p=top_p,
+            )
+            
+            # Extract only the conditional batch if CFG was used
+            if cfg_weight > 0.0:
+                speech_tokens = speech_tokens[0]
+
+            # Clean up tokens
+            speech_tokens = drop_invalid_tokens(speech_tokens)
+            speech_tokens = speech_tokens[speech_tokens < 6561]
+            speech_tokens = speech_tokens.to(self.device)
+            
+            logger.info(f"  - Generated speech tokens: {speech_tokens.shape}")
+            
+            # Step 4: S3Gen inference (speech tokens → waveform)
+            logger.info(f"  - S3Gen inference: speech tokens → waveform...")
+            wav, _ = self.s3gen.inference(
+                speech_tokens=speech_tokens,
                 ref_dict=self.ref_dict,
                 finalize=finalize,
             )
-            wav_np = wav.cpu().numpy()
-            watermarked = self.watermarker.apply_watermark(
-                wav_np, sample_rate=self.sr
-            )
+            
+            # Step 5: Apply watermarking
+            logger.info(f"  - Applying watermarking...")
+            wav_np = wav.squeeze(0).detach().cpu().numpy()
+            watermarked = self.watermarker.apply_watermark(wav_np, sample_rate=self.sr)
         
         result = torch.from_numpy(watermarked).unsqueeze(0)
         logger.info(f"✅ ChatterboxVC.tts completed successfully")
@@ -344,11 +460,111 @@ class ChatterboxVC:
         return result
 
     # ------------------------------------------------------------------
+    # Audio Cleaning and Preprocessing
+    # ------------------------------------------------------------------
+    def clean_audio(self, audio_file_path: str, output_path: str = None) -> str:
+        """
+        High-quality audio cleaning with spectral noise reduction.
+        Optimized for best voice cloning results on GPU serverless.
+        
+        :param audio_file_path: Path to input audio file
+        :param output_path: Path to save cleaned audio (optional)
+        :return: Path to cleaned audio file
+        """
+        logger.info(f"🔬 High-quality audio cleaning: {audio_file_path}")
+        
+        if output_path is None:
+            base, ext = os.path.splitext(audio_file_path)
+            output_path = f"{base}_cleaned{ext}"
+        
+        try:
+            # Import required libraries
+            import noisereduce as nr
+            import soundfile as sf
+            from scipy.signal import butter, filtfilt
+            logger.info("  - Using advanced spectral noise reduction")
+        except ImportError as e:
+            logger.error(f"❌ Required library missing: {e}")
+            logger.error("  - Install with: pip install noisereduce soundfile")
+            return audio_file_path  # Return original on failure
+        
+        try:
+            # Load audio
+            audio, sr = librosa.load(audio_file_path, sr=None)
+            logger.info(f"  - Loaded audio: {len(audio)} samples @ {sr}Hz, duration: {len(audio)/sr:.2f}s")
+            
+            original_length = len(audio)
+            
+            # 1. Initial trim to remove obvious silence
+            audio_trimmed, _ = librosa.effects.trim(audio, top_db=15)
+            logger.info(f"  - Initial trim: {len(audio_trimmed)} samples ({len(audio_trimmed)/sr:.2f}s)")
+            
+            # 2. Spectral noise reduction (most important for quality)
+            audio_denoised = nr.reduce_noise(
+                y=audio_trimmed, 
+                sr=sr,
+                stationary=False,      # Handle varying background noise
+                prop_decrease=0.85,    # Aggressive noise reduction
+                n_grad_freq=2,         # Frequency smoothing
+                n_grad_time=4,         # Time smoothing
+                n_fft=2048,           # Good frequency resolution
+                win_length=2048,      # Window size
+                hop_length=512        # Overlap for smoothness
+            )
+            logger.info(f"  - Applied spectral noise reduction")
+            
+            # 3. High-pass filter to remove low-frequency rumble
+            nyquist = sr / 2
+            low_cutoff = 85  # Remove below 85Hz (preserves voice fundamentals)
+            low = low_cutoff / nyquist
+            b, a = butter(6, low, btype='high')  # 6th order for steep rolloff
+            audio_filtered = filtfilt(b, a, audio_denoised)
+            logger.info(f"  - Applied high-pass filter @ {low_cutoff}Hz")
+            
+            # 4. Gentle normalization to preserve dynamics
+            peak = np.max(np.abs(audio_filtered))
+            if peak > 0:
+                # Normalize to -3dB to prevent clipping while preserving dynamics
+                target_level = 0.707  # -3dB
+                audio_normalized = audio_filtered * (target_level / peak)
+            else:
+                audio_normalized = audio_filtered
+            
+            # 5. Final precision trim to remove any remaining silence
+            audio_final, trim_idx = librosa.effects.trim(
+                audio_normalized, 
+                top_db=25,           # More sensitive trim
+                frame_length=2048,   # Longer frames for stability
+                hop_length=512
+            )
+            
+            # 6. Quality checks
+            final_duration = len(audio_final) / sr
+            if final_duration < 0.5:  # Less than 0.5 seconds
+                logger.warning(f"  - Audio very short after cleaning: {final_duration:.2f}s")
+            elif final_duration < 2.0:  # Less than 2 seconds
+                logger.info(f"  - Short audio after cleaning: {final_duration:.2f}s")
+            
+            # Save cleaned audio with high quality
+            sf.write(output_path, audio_final, sr, format='WAV', subtype='PCM_24')
+            
+            logger.info(f"✅ High-quality cleaning completed: {output_path}")
+            logger.info(f"  - Original: {original_length/sr:.2f}s → Cleaned: {len(audio_final)/sr:.2f}s")
+            logger.info(f"  - Reduction: {(1 - len(audio_final)/original_length)*100:.1f}%")
+            return output_path
+            
+        except Exception as e:
+            logger.error(f"❌ Audio cleaning failed: {e}")
+            import traceback
+            logger.error(f"  - Full traceback: {traceback.format_exc()}")
+            return audio_file_path  # Return original on failure
+
+    # ------------------------------------------------------------------
     # Voice Profile Management
     # ------------------------------------------------------------------
     def save_voice_profile(self, audio_file_path: str, save_path: str):
         """
-        Save a complete voice profile including embedding, prompt features, and tokens.
+        Save a complete voice profile including embedding, prompt features, tokens, and VoiceEncoder embedding.
         
         :param audio_file_path: Path to the reference audio file
         :param save_path: Path to save the voice profile (.npy)
@@ -365,9 +581,16 @@ class ChatterboxVC:
             logger.info(f"    - Audio loaded: shape={ref_wav.shape}, sr={sr}")
             
             # Get the full reference dictionary from s3gen
-            logger.info(f"  - Extracting voice embedding...")
+            logger.info(f"  - Extracting S3Gen voice embedding...")
             ref_dict = self.s3gen.embed_ref(ref_wav, sr, device=self.device)
-            logger.info(f"    - Embedding extracted: {len(ref_dict)} keys")
+            logger.info(f"    - S3Gen embedding extracted: {len(ref_dict)} keys")
+            
+            # Also compute voice encoder embedding for T3
+            logger.info(f"  - Extracting VoiceEncoder embedding...")
+            ref_16k_wav = librosa.resample(ref_wav.numpy(), orig_sr=sr, target_sr=S3_SR)
+            ve_embed = torch.from_numpy(self.ve.embeds_from_wavs([ref_16k_wav], sample_rate=S3_SR))
+            ve_embed = ve_embed.mean(axis=0, keepdim=True).to(self.device)
+            logger.info(f"    - VoiceEncoder embedding extracted: shape={ve_embed.shape}")
             
             # Create and save the complete voice profile
             logger.info(f"  - Creating voice profile...")
@@ -383,6 +606,7 @@ class ChatterboxVC:
             logger.info(f"  - Converting to numpy format...")
             profile_data = {
                 "embedding": profile.embedding.detach().cpu().numpy(),
+                "ve_embedding": ve_embed.detach().cpu().numpy(),  # Add VoiceEncoder embedding
             }
             if profile.prompt_feat is not None:
                 profile_data["prompt_feat"] = profile.prompt_feat.detach().cpu().numpy()
@@ -407,10 +631,10 @@ class ChatterboxVC:
 
     def load_voice_profile(self, path: str):
         """
-        Load a complete voice profile with custom format.
+        Load a complete voice profile with custom format including VoiceEncoder embedding.
         
         :param path: Path to the voice profile (.npy)
-        :return: VoiceProfile object
+        :return: VoiceProfile object with ve_embedding attribute
         """
         logger.info(f"📂 Loading voice profile from {path}")
         
@@ -426,6 +650,15 @@ class ChatterboxVC:
                 prompt_token_len=torch.tensor(data["prompt_token_len"]).to(self.device) if "prompt_token_len" in data else None,
             )
             
+            # Add VoiceEncoder embedding as an attribute
+            if "ve_embedding" in data:
+                profile.ve_embedding = torch.tensor(data["ve_embedding"]).to(self.device)
+                logger.info(f"  - VoiceEncoder embedding loaded: shape={profile.ve_embedding.shape}")
+            else:
+                # Fallback for old profiles without voice encoder embedding
+                profile.ve_embedding = None
+                logger.warning(f"  - No VoiceEncoder embedding found in profile (old format)")
+            
             logger.info(f"✅ Voice profile loaded from {path}")
             return profile
             
@@ -435,7 +668,7 @@ class ChatterboxVC:
 
     def set_voice_profile(self, voice_profile_path: str):
         """
-        Set the voice profile from a saved file and update the internal ref_dict.
+        Set the voice profile from a saved file and update the internal ref_dict and ve_embedding.
         
         :param voice_profile_path: Path to the voice profile (.npy)
         """
@@ -460,7 +693,13 @@ class ChatterboxVC:
             logger.info(f"    - ref_dict created with {len(self.ref_dict)} keys")
             logger.info(f"    - ref_dict keys: {list(self.ref_dict.keys())}")
             
-
+            # Set VoiceEncoder embedding for T3 conditioning
+            if hasattr(profile, 've_embedding') and profile.ve_embedding is not None:
+                self.ve_embedding = profile.ve_embedding.to(self.device)
+                logger.info(f"    - VoiceEncoder embedding set: shape={self.ve_embedding.shape}")
+            else:
+                logger.warning(f"    - No VoiceEncoder embedding available in profile")
+                self.ve_embedding = None
             
             logger.info(f"✅ ChatterboxVC.set_voice_profile completed successfully")
             
@@ -593,21 +832,19 @@ class ChatterboxVC:
             storage_client = storage.Client()
             bucket = storage_client.bucket("godnathistorie-a25fa.firebasestorage.app")
             
-            logger.info(f"🔍 Starting Firebase upload: {destination_blob_name}")
+            # Get file size for logging
+            file_size = os.path.getsize(file_path)
+            logger.info(f"🔍 Starting Firebase upload: {destination_blob_name} ({file_size:,} bytes)")
             
-            # Read file data
-            with open(file_path, 'rb') as f:
-                data = f.read()
-            
-            # Create blob and upload
+            # Create blob and upload directly from file (more efficient for large files)
             blob = bucket.blob(destination_blob_name)
             
             # Set metadata if provided
             if metadata:
                 blob.metadata = metadata
             
-            # Upload the data
-            blob.upload_from_string(data, content_type=content_type)
+            # Upload directly from file path (more memory efficient)
+            blob.upload_from_filename(file_path, content_type=content_type)
             
             # Make the blob publicly accessible
             blob.make_public()
@@ -624,7 +861,7 @@ class ChatterboxVC:
 
     def create_voice_clone(self, audio_file_path: str, voice_id: str = None, voice_name: str = None, metadata: Dict = None, sample_text: str = None) -> Dict:
         """
-        Create voice clone from audio file.
+        Create voice clone from audio file with high-quality audio cleaning.
         
         Args:
             audio_file_path: Path to the audio file
@@ -653,10 +890,15 @@ class ChatterboxVC:
         logger.info(f"  - sample_text: {sample_text}")
         
         try:
-            # Step 1: Save voice profile from audio
+            # Step 0: Apply high-quality audio cleaning
+            logger.info(f"  - Step 0: Applying high-quality audio cleaning...")
+            processed_audio_path = self.clean_audio(audio_file_path)
+            logger.info(f"    - Audio cleaning completed: {processed_audio_path}")
+            
+            # Step 1: Save voice profile from (cleaned) audio
             logger.info(f"  - Step 1: Saving voice profile...")
             profile_path = f"{voice_id}.npy"
-            self.save_voice_profile(audio_file_path, profile_path)
+            self.save_voice_profile(processed_audio_path, profile_path)
             logger.info(f"    - Voice profile saved: {profile_path}")
             
             # Step 2: Set voice profile
@@ -687,11 +929,19 @@ class ChatterboxVC:
                 f.write(sample_mp3_bytes)
             logger.info(f"    - Sample audio saved: {sample_audio_path}")
             
-            # Step 5: Convert original audio to MP3 and save
-            logger.info(f"  - Step 5: Converting original audio to MP3...")
-            recorded_audio_path = f"{voice_id}_recorded.mp3"
-            self.convert_audio_file_to_mp3(audio_file_path, recorded_audio_path, "160k")
-            logger.info(f"    - Recorded audio saved: {recorded_audio_path}")
+            # Step 5: Keep cleaned audio as high-quality WAV for future use
+            logger.info(f"  - Step 5: Preparing cleaned audio for storage...")
+            recorded_audio_path = f"{voice_id}_recorded.wav"
+            
+            # If cleaned audio has a different path, rename it to the final path
+            if processed_audio_path != recorded_audio_path:
+                import shutil
+                shutil.move(processed_audio_path, recorded_audio_path)
+                logger.info(f"    - Cleaned audio renamed to: {recorded_audio_path}")
+            else:
+                logger.info(f"    - Using cleaned audio: {recorded_audio_path}")
+            
+            # Note: We keep the cleaned WAV file (don't clean it up) for Firebase upload
             
             generation_time = time.time() - start_time
             
@@ -712,6 +962,11 @@ class ChatterboxVC:
                 base_path = f"audio/voices/{language}"
                 logger.info(f"    - Using regular folder: {base_path}")
             
+            # Firebase Storage Structure:
+            # /{base_path}/profiles/{voice_id}.npy     - Voice profile for TTS
+            # /{base_path}/recorded/{voice_id}.wav     - High-quality cleaned source audio
+            # /{base_path}/samples/{voice_id}.mp3      - Demo sample (compressed for size)
+            
             # Upload sample audio to correct bucket path
             self.upload_to_firebase(
                 sample_audio_path, 
@@ -719,11 +974,11 @@ class ChatterboxVC:
                 content_type="audio/mpeg"
             )
             
-            # Upload recorded audio to correct bucket path
+            # Upload recorded audio (cleaned WAV) to correct bucket path
             self.upload_to_firebase(
                 recorded_audio_path, 
-                f"{base_path}/recorded/{voice_id}_recorded.mp3",
-                content_type="audio/mpeg"
+                f"{base_path}/recorded/{voice_id}_recorded.wav",
+                content_type="audio/wav"
             )
             
             # Upload voice profile to correct bucket path
@@ -738,8 +993,8 @@ class ChatterboxVC:
                 "status": "success",
                 "voice_id": voice_id,
                 "profile_path": f"{voice_id}.npy",
-                "recorded_audio_path": f"{voice_id}_recorded.mp3",
-                "sample_audio_path": f"{voice_id}_sample.mp3",
+                "recorded_audio_path": f"{voice_id}_recorded.wav",  # Now WAV for best quality
+                "sample_audio_path": f"{voice_id}_sample.mp3",      # Sample stays MP3 for size
                 "generation_time": generation_time,
                 "metadata": metadata or {},
                 "language": language
@@ -750,6 +1005,15 @@ class ChatterboxVC:
             logger.info(f"  - Recorded audio path: {recorded_audio_path}")
             logger.info(f"  - Sample audio path: {sample_audio_path}")
             logger.info(f"  - Generation time: {generation_time:.2f}s")
+            
+            # Clean up local files after Firebase upload (keep serverless environment clean)
+            try:
+                for file_path in [profile_path, recorded_audio_path, sample_audio_path]:
+                    if os.path.exists(file_path):
+                        os.remove(file_path)
+                        logger.info(f"  - Cleaned up local file: {file_path}")
+            except Exception as e:
+                logger.warning(f"  - Failed to clean up some local files: {e}")
             
             return result
             

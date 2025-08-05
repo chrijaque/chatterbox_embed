@@ -164,59 +164,6 @@ class T3(nn.Module):
             hidden_states=hidden_states,
         )
 
-    def forward(self, text):
-        """
-        Simple forward method that accepts text and returns speech tokens.
-        This is what s3gen.py expects.
-        
-        Args:
-            text: Input text (string)
-            
-        Returns:
-            torch.Tensor: Speech tokens
-        """
-        # Import tokenizer here to avoid circular imports
-        from ..tokenizers.tokenizer import EnTokenizer
-        
-        # Load tokenizer (this should be passed in or stored)
-        # For now, we'll use a simple approach
-        import os
-        model_dir = os.path.dirname(os.path.abspath(__file__))
-        tokenizer_path = os.path.join(model_dir, "tokenizer.json")
-        
-        try:
-            tokenizer = EnTokenizer(tokenizer_path)
-        except Exception as e:
-            logger.warning(f"Could not load tokenizer from {tokenizer_path}: {e}")
-            # Create dummy tokens for now
-            return torch.zeros(1, 100, dtype=torch.long, device=self.device)
-        
-        # Tokenize the text
-        text_tokens = tokenizer.encode(text)
-        text_tokens = torch.tensor(text_tokens, dtype=torch.long).unsqueeze(0)
-        
-        # Add start and stop tokens
-        start_token = torch.tensor([[self.hp.start_text_token]], dtype=torch.long, device=self.device)
-        stop_token = torch.tensor([[self.hp.stop_text_token]], dtype=torch.long, device=self.device)
-        text_tokens = torch.cat([start_token, text_tokens, stop_token], dim=1)
-        
-        # Create simple conditioning (dummy for now)
-        speaker_emb = torch.zeros(1, 256, device=self.device)
-        emotion_adv = torch.tensor(0.5, device=self.device)
-        t3_cond = T3Cond(speaker_emb=speaker_emb, emotion_adv=emotion_adv)
-        
-        # Use inference method
-        speech_tokens = self.inference(
-            t3_cond=t3_cond,
-            text_tokens=text_tokens,
-            max_new_tokens=512,
-            temperature=0.8,
-            do_sample=True,
-            stop_on_eos=True,
-        )
-        
-        return speech_tokens
-
     def loss(
         self,
         *,
