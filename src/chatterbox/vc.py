@@ -622,7 +622,7 @@ class ChatterboxVC:
             # Return the path as fallback
             return f"https://storage.googleapis.com/godnathistorie-a25fa.firebasestorage.app/{destination_blob_name}"
 
-    def create_voice_clone(self, audio_file_path: str, voice_id: str = None, voice_name: str = None, metadata: Dict = None) -> Dict:
+    def create_voice_clone(self, audio_file_path: str, voice_id: str = None, voice_name: str = None, metadata: Dict = None, sample_text: str = None) -> Dict:
         """
         Create voice clone from audio file.
         
@@ -631,6 +631,7 @@ class ChatterboxVC:
             voice_id: Unique voice identifier (optional, will generate if not provided)
             voice_name: Voice name (required if voice_id not provided)
             metadata: Optional metadata
+            sample_text: Custom text for sample generation (optional, uses original audio if not provided)
             
         Returns:
             Dict with status, voice_id, profile_path, recorded_audio_path, sample_audio_path, generation_time
@@ -649,6 +650,7 @@ class ChatterboxVC:
         logger.info(f"  - voice_id: {voice_id}")
         logger.info(f"  - voice_name: {voice_name}")
         logger.info(f"  - metadata: {metadata}")
+        logger.info(f"  - sample_text: {sample_text}")
         
         try:
             # Step 1: Save voice profile from audio
@@ -664,7 +666,14 @@ class ChatterboxVC:
             
             # Step 3: Generate sample audio
             logger.info(f"  - Step 3: Generating sample audio...")
-            sample_audio = self.generate(audio_file_path)
+            if sample_text:
+                # Generate custom sample text
+                logger.info(f"    - Using custom sample text: '{sample_text}'")
+                sample_audio = self.tts(sample_text)
+            else:
+                # Recreate original audio using voice cloning
+                logger.info(f"    - Recreating original audio with voice cloning")
+                sample_audio = self.generate(audio_file_path)
             logger.info(f"    - Sample audio generated, shape: {sample_audio.shape}")
             
             # Step 4: Convert sample to MP3 and save
