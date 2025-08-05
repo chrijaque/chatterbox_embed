@@ -671,9 +671,10 @@ class ChatterboxVC:
                 logger.info(f"    - Using custom sample text: '{sample_text}'")
                 sample_audio = self.tts(sample_text)
             else:
-                # Recreate original audio using voice cloning
-                logger.info(f"    - Recreating original audio with voice cloning")
-                sample_audio = self.generate(audio_file_path)
+                # Generate default sample text using voice profile
+                default_sample_text = f"Hello, this is the voice profile of {voice_name or 'this voice'}. I can be used to narrate whimsical stories and fairytales."
+                logger.info(f"    - Using default sample text: '{default_sample_text}'")
+                sample_audio = self.tts(default_sample_text)
             logger.info(f"    - Sample audio generated, shape: {sample_audio.shape}")
             
             # Step 4: Convert sample to MP3 and save
