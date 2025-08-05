@@ -877,7 +877,7 @@ class ChatterboxTTS:
 
     def generate_tts_story(self, text: str, voice_id: str, profile_base64: str, 
                           language: str = 'en', story_type: str = 'user', 
-                          is_kids_voice: bool = False) -> Dict:
+                          is_kids_voice: bool = False, metadata: Dict = None) -> Dict:
         """
         Generate TTS story with voice profile from base64.
         
@@ -888,6 +888,7 @@ class ChatterboxTTS:
             language: Language code
             story_type: Type of story
             is_kids_voice: Whether it's a kids voice
+            metadata: Optional metadata (for API compatibility)
             
         Returns:
             Dict with status, audio_data, and generation_time
@@ -905,6 +906,7 @@ class ChatterboxTTS:
         logger.info(f"  - language: {language}")
         logger.info(f"  - story_type: {story_type}")
         logger.info(f"  - is_kids_voice: {is_kids_voice}")
+        logger.info(f"  - metadata: {metadata}")
         
         try:
             # Step 1: Load voice profile from base64
