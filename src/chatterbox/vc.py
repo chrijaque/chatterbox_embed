@@ -504,12 +504,7 @@ class ChatterboxVC:
                 y=audio_trimmed, 
                 sr=sr,
                 stationary=False,      # Handle varying background noise
-                prop_decrease=0.85,    # Aggressive noise reduction
-                n_grad_freq=2,         # Frequency smoothing
-                n_grad_time=4,         # Time smoothing
-                n_fft=2048,           # Good frequency resolution
-                win_length=2048,      # Window size
-                hop_length=512        # Overlap for smoothness
+                prop_decrease=0.85     # Aggressive noise reduction
             )
             logger.info(f"  - Applied spectral noise reduction")
             
