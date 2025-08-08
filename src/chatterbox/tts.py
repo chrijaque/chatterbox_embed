@@ -987,29 +987,29 @@ class AdvancedStitcher:
     def __init__(self):
         # Punctuation-based pause durations (in milliseconds)
         self.punctuation_pauses = {
-            '.': 400,   # Period: longer pause for sentence end
-            '!': 350,   # Exclamation: medium-long pause with emotion
-            '?': 380,   # Question: medium-long pause with inflection
-            ',': 180,   # Comma: short pause for breath
-            ';': 250,   # Semicolon: medium pause for clause separation
-            ':': 220,   # Colon: medium-short pause for introduction
-            '-': 150,   # Dash: short pause for quick aside
+            '.': 270,   # Period: longer pause for sentence end
+            '!': 250,   # Exclamation: medium-long pause with emotion
+            '?': 250,   # Question: medium-long pause with inflection
+            ',': 80,   # Comma: short pause for breath
+            ';': 120,   # Semicolon: medium pause for clause separation
+            ':': 175,   # Colon: medium-short pause for introduction
+            '-': 100,   # Dash: short pause for quick aside
             '—': 200,   # Em dash: medium pause for emphasis
-            '\n': 500,  # Paragraph: longest pause for topic change
+            '\n': 320,  # Paragraph: longest pause for topic change
         }
         
         # Content type pause modifiers
         self.content_type_modifiers = {
             ContentType.DIALOGUE: 0.8,     # Faster pacing for conversation
             ContentType.NARRATIVE: 1.0,    # Standard pacing for storytelling
-            ContentType.DESCRIPTIVE: 1.3,  # Slower pacing for descriptions
+            ContentType.DESCRIPTIVE: 1.2,  # Slower pacing for descriptions
             ContentType.TRANSITION: 0.9,   # Slightly faster for transitions
         }
         
         # Fade settings
         self.fade_in_duration = 50   # ms
         self.fade_out_duration = 50  # ms
-        self.crossfade_duration = 30 # ms for overlapping chunks
+        self.crossfade_duration = 25 # ms for overlapping chunks
     
     def calculate_smart_pause(self, chunk_info: ChunkInfo, next_chunk_info: Optional[ChunkInfo] = None) -> int:
         """Calculate optimal pause duration based on context"""
@@ -2082,7 +2082,7 @@ class ChatterboxTTS:
         
         return wav_bytes
 
-    def upload_to_firebase(self, data: bytes, destination_blob_name: str, content_type: str = "application/octet-stream", metadata: dict = None) -> str:
+    def upload_to_firebase(self, data: bytes, destination_blob_name: str, content_type: str = "application/octet-stream", metadata: dict = None) -> Optional[str]:
         """
         Upload data directly to Firebase Storage with metadata
         
@@ -2101,28 +2101,37 @@ class ChatterboxTTS:
             
             logger.info(f"🔍 Starting Firebase upload: {destination_blob_name} ({len(data)} bytes)")
             
-            # Create blob and upload
+            # Create blob and upload (create-only to avoid requiring delete on overwrite)
             blob = bucket.blob(destination_blob_name)
             
             # Set metadata if provided
             if metadata:
                 blob.metadata = metadata
             
-            # Upload the data
-            blob.upload_from_string(data, content_type=content_type)
+            # Upload the data with precondition: create only if object doesn't exist
+            try:
+                blob.upload_from_string(data, content_type=content_type, if_generation_match=0)
+            except Exception as precond_err:
+                # If the object exists or precondition failed, surface the error to caller
+                logger.error(f"❌ Precondition for create-only upload failed: {precond_err}")
+                return None
             
-            # Make the blob publicly accessible
-            blob.make_public()
-            
-            public_url = blob.public_url
+            # Try to make the blob publicly accessible (non-fatal if not permitted)
+            public_url: Optional[str]
+            try:
+                blob.make_public()
+                public_url = blob.public_url
+            except Exception as e:
+                logger.warning(f"⚠️ make_public failed (object may still be uploaded): {e}")
+                # Fallback to GCS URL (may still require auth depending on bucket policy)
+                public_url = f"https://storage.googleapis.com/{bucket.name}/{destination_blob_name}"
+
             logger.info(f"✅ Uploaded to Firebase: {destination_blob_name} -> {public_url}")
-            
             return public_url
             
         except Exception as e:
             logger.error(f"❌ Failed to upload to Firebase: {e}")
-            # Return the path as fallback
-            return f"https://storage.googleapis.com/godnathistorie-a25fa.firebasestorage.app/{destination_blob_name}"
+            return None
 
     def generate_tts_story(self, text: str, voice_id: str, profile_base64: str, 
                           language: str = 'en', story_type: str = 'user', 
@@ -2219,7 +2228,10 @@ class ChatterboxTTS:
                         "audio_size": len(mp3_bytes)
                     }
                 )
-                logger.info(f"    - Uploaded successfully: {firebase_url}")
+                if firebase_url:
+                    logger.info(f"    - Uploaded successfully: {firebase_url}")
+                else:
+                    logger.warning("⚠️ Upload did not complete (object may already exist and overwrite is not permitted). Consider using unique filenames or granting delete permission.")
             except Exception as upload_error:
                 logger.error(f"❌ Firebase upload failed: {upload_error}")
                 firebase_url = None
