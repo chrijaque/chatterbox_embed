@@ -950,7 +950,7 @@ class ChunkQualityAnalyzer:
                 too_long_is_critical or
                 too_fast_is_critical or
                 any(issue in critical_issues for issue in quality_issues) or
-                overall_score < 50
+                overall_score < 0
             )
             
             quality_score = QualityScore(
