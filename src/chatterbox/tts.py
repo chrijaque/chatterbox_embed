@@ -791,12 +791,13 @@ class ChunkQualityAnalyzer:
     def __init__(self):
         self.min_duration = 0.3      # Minimum acceptable duration (seconds)
         self.max_duration = 120.0    # Fallback maximum acceptable duration (seconds)
-        self.silence_threshold = -35  # dB threshold for silence detection
-        self.max_silence_ratio = 0.4  # Maximum acceptable silence ratio
+        self.silence_threshold = -30  # dB threshold for silence detection
+        self.max_silence_ratio = 0.5  # Maximum acceptable silence ratio
         self.min_peak_db = -25       # Minimum peak level (too quiet)
         self.max_peak_db = -1        # Maximum peak level (too loud, risk of clipping)
         self.min_rms_db = -35        # Minimum RMS level
-        self.chars_per_second_range = (4, 25)  # Expected characters per second range
+        # Relaxed speaking rate bounds to avoid over-penalizing fast/slow but acceptable delivery
+        self.chars_per_second_range = (3, 35)  # Expected characters per second range
     
     def detect_silence_segments(self, audio_data: np.ndarray, sample_rate: int) -> Tuple[float, List[Tuple[float, float]]]:
         """Detect silence segments in audio"""
@@ -936,13 +937,21 @@ class ChunkQualityAnalyzer:
             overall_score = max(0, base_score)
             
             # Determine if regeneration is needed
+            # Critical issues trigger retries regardless of score, but "too_fast" is only critical if extremely fast
+            critical_issues = {"too_short", "excessive_silence", "too_loud"}
+            chars_per_sec = chunk_info.char_count / max(duration, 1e-6)
+            too_fast_is_critical = (chars_per_sec > (self.chars_per_second_range[1] * 1.3))  # e.g., > 45 cps
             # Treat "too_long" as critical only when speaking rate is unrealistically slow
-            critical_issues = {"too_short", "excessive_silence", "too_loud", "too_fast"}
             too_long_is_critical = (
                 "too_long" in quality_issues and
-                (chunk_info.char_count / max(duration, 1e-6)) < (self.chars_per_second_range[0] * 0.9)
+                chars_per_sec < (self.chars_per_second_range[0] * 0.75)
             )
-            should_regenerate = too_long_is_critical or any(issue in critical_issues for issue in quality_issues) or overall_score < 55
+            should_regenerate = (
+                too_long_is_critical or
+                too_fast_is_critical or
+                any(issue in critical_issues for issue in quality_issues) or
+                overall_score < 50
+            )
             
             quality_score = QualityScore(
                 overall_score=overall_score,
