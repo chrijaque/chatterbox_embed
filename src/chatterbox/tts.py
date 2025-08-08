@@ -976,7 +976,7 @@ class AdvancedStitcher:
         self.punctuation_pauses = {
             '.': 270,   # Period: longer pause for sentence end
             '!': 250,   # Exclamation: medium-long pause with emotion
-            '?': 250,   # Question: medium-long pause with inflection
+            '?': 300,   # Question: medium-long pause with inflection
             ',': 80,   # Comma: short pause for breath
             ';': 120,   # Semicolon: medium pause for clause separation
             ':': 175,   # Colon: medium-short pause for introduction
@@ -987,8 +987,8 @@ class AdvancedStitcher:
         
         # Content type pause modifiers
         self.content_type_modifiers = {
-            ContentType.DIALOGUE: 0.8,     # Faster pacing for conversation
-            ContentType.NARRATIVE: 1.0,    # Standard pacing for storytelling
+            ContentType.DIALOGUE: 0.9,     # Faster pacing for conversation
+            ContentType.NARRATIVE: 1.1,    # Standard pacing for storytelling
             ContentType.DESCRIPTIVE: 1.2,  # Slower pacing for descriptions
             ContentType.TRANSITION: 0.9,   # Slightly faster for transitions
         }
@@ -997,6 +997,9 @@ class AdvancedStitcher:
         self.fade_in_duration = 50   # ms
         self.fade_out_duration = 50  # ms
         self.crossfade_duration = 25 # ms for overlapping chunks
+
+        # Global pause scaling to control narration pace (1.0 = baseline)
+        self.global_pause_factor = 1.0
     
     def calculate_smart_pause(self, chunk_info: ChunkInfo, next_chunk_info: Optional[ChunkInfo] = None) -> int:
         """Calculate optimal pause duration based on context"""
@@ -1026,8 +1029,11 @@ class AdvancedStitcher:
         if chunk_info.complexity_score > 7:
             pause_duration *= 1.1  # Longer pause after complex content
         
+        # Apply global pace factor
+        pause_duration *= max(0.5, min(2.0, self.global_pause_factor))
+
         # Ensure reasonable bounds
-        pause_duration = max(100, min(800, pause_duration))
+        pause_duration = max(100, min(1200, pause_duration))
         
         return int(pause_duration)
     
@@ -1902,7 +1908,7 @@ class ChatterboxTTS:
 
     def generate_long_text(self, text: str, voice_profile_path: str, output_path: str, 
                           max_chars: int = 500, pause_ms: int = 100, temperature: float = 0.8,
-                          exaggeration: float = 0.5, cfg_weight: float = 0.5) -> Tuple[torch.Tensor, int, Dict]:
+                          exaggeration: float = 0.5, cfg_weight: float = 0.5, pause_scale: float = 1.0) -> Tuple[torch.Tensor, int, Dict]:
         """
         Full TTS pipeline for long texts: chunk → generate → stitch → clean.
 
@@ -1927,6 +1933,13 @@ class ChatterboxTTS:
         
         chunk_infos = self.chunk_text(text, max_chars)
         logger.info(f"📦 Split into {len(chunk_infos)} intelligent chunks")
+        
+        # Apply global pace factor to advanced stitcher
+        try:
+            self.advanced_stitcher.global_pause_factor = max(0.5, min(2.0, float(pause_scale)))
+            logger.info(f"🕰️ Global pause scale set to {self.advanced_stitcher.global_pause_factor}")
+        except Exception:
+            logger.warning("⚠️ Failed to apply pause_scale; using default 1.0")
         
         wav_paths = self.generate_chunks(chunk_infos, voice_profile_path, temperature, exaggeration, cfg_weight)
         if not wav_paths:
@@ -1965,6 +1978,7 @@ class ChatterboxTTS:
             "text_length": len(text),
             "max_chars_per_chunk": max_chars,
             "pause_ms": pause_ms,
+            "pause_scale": pause_scale,
             
             # Smart chunking analysis
             "avg_chunk_chars": round(avg_chunk_chars, 1),
@@ -2121,8 +2135,8 @@ class ChatterboxTTS:
             return None
 
     def generate_tts_story(self, text: str, voice_id: str, profile_base64: str, 
-                          language: str = 'en', story_type: str = 'user', 
-                          is_kids_voice: bool = False, metadata: Dict = None) -> Dict:
+                           language: str = 'en', story_type: str = 'user', 
+                           is_kids_voice: bool = False, metadata: Dict = None, pause_scale: float = 1.15) -> Dict:
         """
         Generate TTS story with voice profile from base64.
         
@@ -2175,7 +2189,8 @@ class ChatterboxTTS:
                 pause_ms=150,
                 temperature=0.8,
                 exaggeration=0.5,
-                cfg_weight=0.5
+                cfg_weight=0.5,
+                pause_scale=pause_scale
             )
             
             # Step 3: Convert to MP3 bytes
