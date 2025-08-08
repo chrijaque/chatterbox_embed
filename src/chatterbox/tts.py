@@ -936,22 +936,9 @@ class ChunkQualityAnalyzer:
             
             overall_score = max(0, base_score)
             
-            # Determine if regeneration is needed
-            # Critical issues trigger retries regardless of score, but "too_fast" is only critical if extremely fast
-            critical_issues = {"too_short", "excessive_silence", "too_loud"}
-            chars_per_sec = chunk_info.char_count / max(duration, 1e-6)
-            too_fast_is_critical = (chars_per_sec > (self.chars_per_second_range[1] * 1.3))  # e.g., > 45 cps
-            # Treat "too_long" as critical only when speaking rate is unrealistically slow
-            too_long_is_critical = (
-                "too_long" in quality_issues and
-                chars_per_sec < (self.chars_per_second_range[0] * 0.75)
-            )
-            should_regenerate = (
-                too_long_is_critical or
-                too_fast_is_critical or
-                any(issue in critical_issues for issue in quality_issues) or
-                overall_score < 0
-            )
+            # Do not trigger regeneration based on quality metrics; allow any score.
+            # Retries should only occur if audio generation itself fails (exceptions in generate/save).
+            should_regenerate = False
             
             quality_score = QualityScore(
                 overall_score=overall_score,
@@ -969,7 +956,7 @@ class ChunkQualityAnalyzer:
             
         except Exception as e:
             logger.error(f"❌ Quality analysis failed for chunk {chunk_info.id}: {e}")
-            # Return a poor quality score on analysis failure
+            # Still do not request regeneration; treat as non-blocking QA failure
             return QualityScore(
                 overall_score=30,
                 issues=["analysis_failed"],
@@ -977,7 +964,7 @@ class ChunkQualityAnalyzer:
                 silence_ratio=1.0,
                 peak_db=-np.inf,
                 rms_db=-np.inf,
-                should_regenerate=True
+                should_regenerate=False
             )
 
 
