@@ -2195,8 +2195,11 @@ class ChatterboxTTS:
                 logger.warning(f"Invalid story_type '{final_story_type}', defaulting to 'user'")
                 final_story_type = 'user'
             
-            # Generate Firebase path based on story_type and language
-            firebase_path = f"audio/stories/{language}/{final_story_type}/{voice_id}.mp3"
+            # Generate Firebase path based on story_type and language with unique suffix to avoid collisions
+            import random
+            suffix = ''.join(random.choices('abcdefghijklmnopqrstuvwxyz0123456789', k=4))
+            unique_filename = f"{voice_id}_{suffix}.mp3"
+            firebase_path = f"audio/stories/{language}/{final_story_type}/{unique_filename}"
             logger.info(f"    - Firebase path: {firebase_path}")
             logger.info(f"    - Story type: {final_story_type}")
             
