@@ -790,13 +790,13 @@ class ChunkQualityAnalyzer:
     
     def __init__(self):
         self.min_duration = 0.3      # Minimum acceptable duration (seconds)
-        self.max_duration = 20.0     # Maximum acceptable duration (seconds)
+        self.max_duration = 120.0    # Fallback maximum acceptable duration (seconds)
         self.silence_threshold = -35  # dB threshold for silence detection
         self.max_silence_ratio = 0.4  # Maximum acceptable silence ratio
         self.min_peak_db = -25       # Minimum peak level (too quiet)
         self.max_peak_db = -1        # Maximum peak level (too loud, risk of clipping)
         self.min_rms_db = -35        # Minimum RMS level
-        self.chars_per_second_range = (5, 25)  # Expected characters per second range
+        self.chars_per_second_range = (4, 25)  # Expected characters per second range
     
     def detect_silence_segments(self, audio_data: np.ndarray, sample_rate: int) -> Tuple[float, List[Tuple[float, float]]]:
         """Detect silence segments in audio"""
@@ -866,10 +866,17 @@ class ChunkQualityAnalyzer:
             audio_data, sample_rate = librosa.load(audio_path, sr=None)
             duration = len(audio_data) / sample_rate
             
-            # 1. Duration validation
-            if duration < self.min_duration:
+            # 1. Duration validation (dynamic based on text length)
+            # Compute expected duration bounds from characters-per-second range
+            expected_min_duration = max(0.2, chunk_info.char_count / self.chars_per_second_range[1])
+            expected_max_duration = chunk_info.char_count / self.chars_per_second_range[0]
+            # Allow generous headroom for expressive pacing but cap at fallback max
+            dynamic_max_duration = min(max(15.0, expected_max_duration * 1.5), self.max_duration)
+            dynamic_min_duration = max(self.min_duration, expected_min_duration * 0.5)
+
+            if duration < dynamic_min_duration:
                 quality_issues.append("too_short")
-            elif duration > self.max_duration:
+            elif duration > dynamic_max_duration:
                 quality_issues.append("too_long")
             
             # 2. Silence analysis
@@ -929,8 +936,13 @@ class ChunkQualityAnalyzer:
             overall_score = max(0, base_score)
             
             # Determine if regeneration is needed
-            critical_issues = {"too_short", "too_long", "excessive_silence", "too_loud", "too_fast"}
-            should_regenerate = any(issue in critical_issues for issue in quality_issues) or overall_score < 60
+            # Treat "too_long" as critical only when speaking rate is unrealistically slow
+            critical_issues = {"too_short", "excessive_silence", "too_loud", "too_fast"}
+            too_long_is_critical = (
+                "too_long" in quality_issues and
+                (chunk_info.char_count / max(duration, 1e-6)) < (self.chars_per_second_range[0] * 0.9)
+            )
+            should_regenerate = too_long_is_critical or any(issue in critical_issues for issue in quality_issues) or overall_score < 55
             
             quality_score = QualityScore(
                 overall_score=overall_score,
