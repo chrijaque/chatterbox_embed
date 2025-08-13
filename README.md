@@ -585,9 +585,13 @@ This repo includes a Redis Streams worker for Daezend integration that consumes 
 - Redis
   - `REDIS_URL=rediss://...`
   - `REDIS_NAMESPACE=runpod` (default)
-  - `REDIS_STREAM_NAME=runpod:jobs` (default)
+  - Split streams (recommended):
+    - `WORKER_MODE=tts|vc` (default tts)
+    - `REDIS_STREAM_NAME_TTS=runpod:jobs:tts` (default)
+    - `REDIS_STREAM_NAME_VC=runpod:jobs:vc` (default)
+    - Optional override: `REDIS_STREAM_NAME` (if set, overrides mode-based stream)
   - `REDIS_CONSUMER_GROUP=runpod-consumers` (default)
-  - `REDIS_CONSUMER_NAME=worker-1` (default)
+  - `REDIS_CONSUMER_NAME=<unique>` (default becomes `${WORKER_MODE}-worker-1`)
   - `REDIS_USE_TLS=true` (default)
 - Firebase (RunPod environment)
   - `RUNPOD_SECRET_Firebase` must be set so google-cloud clients can authenticate

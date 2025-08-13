@@ -19,9 +19,27 @@ class RedisWorker:
         self.redis_url = os.getenv("REDIS_URL")
         if not self.redis_url:
             raise RuntimeError("REDIS_URL not set")
-        self.stream = os.getenv("REDIS_STREAM_NAME", "runpod:jobs")
-        self.group = os.getenv("REDIS_CONSUMER_GROUP", "runpod-consumers")
-        self.consumer = os.getenv("REDIS_CONSUMER_NAME", "worker-1")
+        # Worker mode determines the default stream if REDIS_STREAM_NAME is not explicitly set
+        self.mode = os.getenv("WORKER_MODE", "tts").lower()
+        # Allow per-mode stream overrides
+        stream_tts = os.getenv("REDIS_STREAM_NAME_TTS", "runpod:jobs:tts")
+        stream_vc = os.getenv("REDIS_STREAM_NAME_VC", "runpod:jobs:vc")
+        # Final stream resolution: explicit REDIS_STREAM_NAME wins; otherwise choose by mode
+        inferred_stream = stream_tts if self.mode == "tts" else stream_vc
+        self.stream = os.getenv("REDIS_STREAM_NAME", inferred_stream)
+        # Allow per-mode consumer group/name via *_TTS and *_VC (helps when secret names must be unique)
+        group_tts = os.getenv("REDIS_CONSUMER_GROUP_TTS")
+        group_vc = os.getenv("REDIS_CONSUMER_GROUP_VC")
+        name_tts = os.getenv("REDIS_CONSUMER_NAME_TTS")
+        name_vc = os.getenv("REDIS_CONSUMER_NAME_VC")
+
+        inferred_group = (group_tts if self.mode == "tts" else group_vc) or (
+            "tts-consumers" if self.mode == "tts" else "vc-consumers"
+        )
+        inferred_name = (name_tts if self.mode == "tts" else name_vc) or f"{self.mode}-worker-1"
+
+        self.group = os.getenv("REDIS_CONSUMER_GROUP", inferred_group)
+        self.consumer = os.getenv("REDIS_CONSUMER_NAME", inferred_name)
         self.namespace = os.getenv("REDIS_NAMESPACE", "runpod")
         self.dlp_stream = os.getenv("REDIS_DLP_STREAM", "runpod:dlq")
 
@@ -31,10 +49,10 @@ class RedisWorker:
         # Ensure consumer group
         try:
             self.client.xgroup_create(name=self.stream, groupname=self.group, id="0-0", mkstream=True)
-            logger.info(f"Created consumer group {self.group} on {self.stream}")
+            logger.info(f"Created consumer group {self.group} on {self.stream} (mode={self.mode})")
         except redis.ResponseError as e:
             if "BUSYGROUP" in str(e):
-                logger.info("Consumer group already exists")
+                logger.info(f"Consumer group already exists on {self.stream} (mode={self.mode})")
             else:
                 raise
 
