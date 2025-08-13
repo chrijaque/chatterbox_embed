@@ -1058,4 +1058,80 @@ class ChatterboxVC:
             raise
 
 
+def _init_firestore_client():
+    try:
+        from google.cloud import firestore
+        return firestore.Client()
+    except Exception as e:
+        logger.error(f"❌ Failed to initialize Firestore client: {e}")
+        return None
+
+
+def clone_voice(
+    *,
+    name: str,
+    audio_bytes: bytes,
+    audio_format: str = "wav",
+    language: str = "en",
+    is_kids_voice: bool = False,
+    model_type: str = "chatterbox",
+    user_id: str = "",
+    profile_id: Optional[str] = None,
+) -> Dict:
+    """Module-level helper used by Redis worker to clone a voice and update Firestore.
+
+    Returns a dict mirroring create_voice_clone plus Firestore update result.
+    """
+    try:
+        # Persist bytes to a temp file
+        import tempfile
+        import os as _os
+        tmp = tempfile.NamedTemporaryFile(suffix=f".{audio_format}", delete=False)
+        tmp.write(audio_bytes)
+        tmp.flush()
+        tmp.close()
+
+        # Load models and run clone
+        device = "cpu"
+        vc = ChatterboxVC.from_pretrained(device)
+        result = vc.create_voice_clone(audio_file_path=tmp.name, voice_name=name, metadata={
+            "language": language,
+            "is_kids_voice": is_kids_voice,
+            "model_type": model_type,
+            "user_id": user_id,
+        })
+
+        # Clean up temp file
+        try:
+            _os.unlink(tmp.name)
+        except Exception:
+            pass
+
+        # Write Firestore voice_profiles/{docId}
+        client = _init_firestore_client()
+        if client and result.get("status") == "success":
+            doc_id = profile_id or result.get("voice_id") or name
+            doc_ref = client.collection("voice_profiles").document(doc_id)
+            from google.cloud.firestore import SERVER_TIMESTAMP  # type: ignore
+            base_path = f"audio/voices/{language}{'/kids' if is_kids_voice else ''}"
+            doc_ref.set({
+                "userId": user_id,
+                "name": name,
+                "language": language,
+                "isKidsVoice": is_kids_voice,
+                "status": "ready",
+                "samplePath": f"{base_path}/samples/{result.get('voice_id')}_sample.mp3",
+                "profilePath": f"{base_path}/profiles/{result.get('voice_id')}.npy",
+                "recordedPath": f"{base_path}/recorded/{result.get('voice_id')}_recorded.wav",
+                "createdAt": SERVER_TIMESTAMP,
+                "updatedAt": SERVER_TIMESTAMP,
+                "metadata": result.get("metadata", {}),
+            }, merge=True)
+            result["firestore_profile_id"] = doc_id
+
+        return result
+    except Exception as e:
+        logger.exception("clone_voice failed")
+        return {"status": "error", "error": str(e)}
+
 

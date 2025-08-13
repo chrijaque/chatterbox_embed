@@ -2136,7 +2136,8 @@ class ChatterboxTTS:
 
     def generate_tts_story(self, text: str, voice_id: str, profile_base64: str, 
                            language: str = 'en', story_type: str = 'user', 
-                           is_kids_voice: bool = False, metadata: Dict = None, pause_scale: float = 1.15) -> Dict:
+                           is_kids_voice: bool = False, metadata: Dict = None, pause_scale: float = 1.15,
+                           *, user_id: str = "", story_id: str = "") -> Dict:
         """
         Generate TTS story with voice profile from base64.
         
@@ -2258,6 +2259,53 @@ class ChatterboxTTS:
                 "story_type": final_story_type,
                 "generation_time": generation_time
             }
+
+            # Firestore write for stories/{story_id}
+            try:
+                from google.cloud import firestore
+                client = firestore.Client()
+                from google.cloud.firestore import SERVER_TIMESTAMP  # type: ignore
+                if story_id:
+                    doc = client.collection("stories").document(story_id)
+                    # Build new audio version entry
+                    version_id = str(int(time.time() * 1000))
+                    new_version = {
+                        "id": version_id,
+                        "voiceId": voice_id,
+                        "voiceName": voice_id,
+                        "audioUrl": firebase_url or "",
+                        "url": firebase_url or "",
+                        "createdAt": SERVER_TIMESTAMP,
+                        "updatedAt": SERVER_TIMESTAMP,
+                        "service": "chatterbox",
+                        "metadata": {
+                            "format": "mp3",
+                            "size": len(mp3_bytes),
+                            "duration": generation_metadata.get("duration_sec", 0) if 'generation_metadata' in locals() else 0,
+                            "voiceName": voice_id,
+                        },
+                    }
+                    # Update atomically: set status and push new version
+                    doc.set({
+                        "audioStatus": "ready",
+                        "audioUrl": firebase_url or "",
+                        "updatedAt": SERVER_TIMESTAMP,
+                    }, merge=True)
+                    # Firestore array union append (fallback to read-modify-write if needed)
+                    try:
+                        from google.cloud.firestore_v1 import ArrayUnion
+                        doc.update({"audioVersions": ArrayUnion([new_version])})
+                    except Exception:
+                        # Read-modify-write fallback
+                        snap = doc.get()
+                        existing = []
+                        if snap.exists and isinstance(snap.to_dict().get("audioVersions"), list):
+                            existing = snap.to_dict()["audioVersions"]
+                        existing.append(new_version)
+                        doc.set({"audioVersions": existing}, merge=True)
+                    result["firestore_story_id"] = story_id
+            except Exception as fe:
+                logger.warning(f"⚠️ Firestore update for story failed: {fe}")
             
             logger.info(f"✅ TTS story generated successfully!")
             logger.info(f"  - Audio size: {len(mp3_bytes)} bytes")
