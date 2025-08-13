@@ -962,25 +962,38 @@ class ChatterboxVC:
             # /{base_path}/recorded/{voice_id}.wav     - High-quality cleaned source audio
             # /{base_path}/samples/{voice_id}.mp3      - Demo sample (compressed for size)
             
+            # Common metadata for all files
+            common_meta = {
+                "user_id": str((metadata or {}).get("user_id", "")),
+                "voice_id": voice_id,
+                "voice_name": voice_name or "",
+                "language": language,
+                "is_kids_voice": str(is_kids_voice).lower(),
+                "model_type": (metadata or {}).get("model_type", "chatterbox"),
+            }
+
             # Upload sample audio to correct bucket path
             self.upload_to_firebase(
                 sample_audio_path, 
                 f"{base_path}/samples/{voice_id}_sample.mp3",
-                content_type="audio/mpeg"
+                content_type="audio/mpeg",
+                metadata={**common_meta, "file_kind": "sample"}
             )
             
             # Upload recorded audio (cleaned WAV) to correct bucket path
             self.upload_to_firebase(
                 recorded_audio_path, 
                 f"{base_path}/recorded/{voice_id}_recorded.wav",
-                content_type="audio/wav"
+                content_type="audio/wav",
+                metadata={**common_meta, "file_kind": "recorded"}
             )
             
             # Upload voice profile to correct bucket path
             self.upload_to_firebase(
                 profile_path, 
                 f"{base_path}/profiles/{voice_id}.npy",
-                content_type="application/octet-stream"
+                content_type="application/octet-stream",
+                metadata={**common_meta, "file_kind": "profile"}
             )
             
             # Return JSON-serializable response
