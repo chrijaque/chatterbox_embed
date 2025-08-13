@@ -575,3 +575,35 @@ print(f"Extracted watermark: {watermark}")
 
 # Disclaimer
 Don't use this model to do bad things. Prompts are sourced from freely available data on the internet.
+
+## Redis Worker Integration (Daezend)
+
+This repo includes a Redis Streams worker for Daezend integration that consumes jobs from the API app and writes outputs to Firebase. See `src/chatterbox/worker_redis.py`.
+
+### Environment variables
+
+- Redis
+  - `REDIS_URL=rediss://...`
+  - `REDIS_NAMESPACE=runpod` (default)
+  - `REDIS_STREAM_NAME=runpod:jobs` (default)
+  - `REDIS_CONSUMER_GROUP=runpod-consumers` (default)
+  - `REDIS_CONSUMER_NAME=worker-1` (default)
+  - `REDIS_USE_TLS=true` (default)
+- Firebase (RunPod environment)
+  - `RUNPOD_SECRET_Firebase` must be set so google-cloud clients can authenticate
+
+### Job payloads (from API app)
+
+- Clone (type `vc`): `user_id`, `name`, `audio_base64`, `audio_format`, `language`, `is_kids_voice`, `model_type`, `profile_id?`
+- TTS (type `tts`): `user_id`, `story_id`, `voice_id`, `text`, `profile_base64`, `language`, `story_type`, `is_kids_voice`, `model_type`
+
+### Firestore updates performed by the worker
+
+- Clone: writes `voice_profiles/{profile_id or voice_id}` with status 'ready', paths, and timestamps
+- TTS: updates `stories/{story_id}` with `audioStatus='ready'`, `audioUrl`, and appends an `audioVersions` entry (`service='chatterbox'`)
+
+### Run locally
+
+```bash
+python -m chatterbox.worker_redis
+```

@@ -7,8 +7,8 @@ from typing import Dict, Any
 
 import redis
 
-from .vc import clone_voice  # expected to return dict with paths/ids and handle Firebase via RUNPOD_SECRET_Firebase
-from .tts import generate_tts  # expected to return dict with audio path and metadata
+from .vc import clone_voice  # expected to write Firebase and Voice Profile doc
+from .tts import ChatterboxTTS  # use class to call generate_tts_story with user_id/story_id
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -37,6 +37,14 @@ class RedisWorker:
                 logger.info("Consumer group already exists")
             else:
                 raise
+
+        # Lazy-initialized TTS engine
+        self._tts = None
+
+    def _get_tts(self):
+        if self._tts is None:
+            self._tts = ChatterboxTTS.from_pretrained("cpu")
+        return self._tts
 
     def _job_key(self, job_id: str) -> str:
         return f"{self.namespace}:job:{job_id}"
@@ -69,14 +77,15 @@ class RedisWorker:
                 )
                 self.set_status(job_id, "completed", **result)
             elif job_type == "tts":
-                result = generate_tts(
-                    voice_id=payload.get("voice_id", ""),
+                tts = self._get_tts()
+                result = tts.generate_tts_story(
                     text=payload.get("text", ""),
-                    profile_base64=payload.get("profile_base64"),
-                    language=payload.get("language"),
+                    voice_id=payload.get("voice_id", ""),
+                    profile_base64=payload.get("profile_base64") or "",
+                    language=payload.get("language") or "en",
                     story_type=payload.get("story_type", "user"),
                     is_kids_voice=payload.get("is_kids_voice", "false") == "true",
-                    model_type=payload.get("model_type", "chatterbox"),
+                    metadata={"model_type": payload.get("model_type", "chatterbox")},
                     user_id=payload.get("user_id", ""),
                     story_id=payload.get("story_id", ""),
                 )
