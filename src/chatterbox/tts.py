@@ -2134,10 +2134,10 @@ class ChatterboxTTS:
             logger.error(f"❌ Failed to upload to Firebase: {e}")
             return None
 
-    def generate_tts_story(self, text: str, voice_id: str, profile_base64: str, 
+    def generate_tts_story(self, text: str, voice_id: str, profile_base64: str = "", 
                            language: str = 'en', story_type: str = 'user', 
                            is_kids_voice: bool = False, metadata: Dict = None, pause_scale: float = 1.15,
-                           *, user_id: str = "", story_id: str = "") -> Dict:
+                           *, user_id: str = "", story_id: str = "", profile_path: str = "") -> Dict:
         """
         Generate TTS story with voice profile from base64.
         
@@ -2169,16 +2169,31 @@ class ChatterboxTTS:
         logger.info(f"  - metadata: {metadata}")
         
         try:
-            # Step 1: Load voice profile from base64
-            logger.info(f"  - Step 1: Loading voice profile from base64...")
-            profile_bytes = base64.b64decode(profile_base64)
+            # Step 1: Load voice profile from base64 or GCS path
+            if profile_base64:
+                logger.info(f"  - Step 1: Loading voice profile from base64...")
+                profile_bytes = base64.b64decode(profile_base64)
+            elif profile_path:
+                logger.info(f"  - Step 1: Loading voice profile from GCS path: {profile_path}")
+                try:
+                    from google.cloud import storage
+                    storage_client = storage.Client()
+                    bucket = storage_client.bucket("godnathistorie-a25fa.firebasestorage.app")
+                    blob = bucket.blob(profile_path)
+                    profile_bytes = blob.download_as_bytes()
+                    logger.info("    - Voice profile downloaded from GCS")
+                except Exception as gcs_e:
+                    logger.error(f"❌ Failed to download profile from GCS: {gcs_e}")
+                    raise
+            else:
+                raise ValueError("Either profile_base64 or profile_path must be provided")
             
             # Save to temporary file
             with tempfile.NamedTemporaryFile(suffix=".npy", delete=False) as temp_file:
                 temp_file.write(profile_bytes)
                 temp_profile_path = temp_file.name
             
-            logger.info(f"    - Voice profile loaded from base64")
+            logger.info(f"    - Voice profile loaded")
             
             # Step 2: Generate TTS audio
             logger.info(f"  - Step 2: Generating TTS audio...")

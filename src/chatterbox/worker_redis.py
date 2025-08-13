@@ -82,6 +82,7 @@ class RedisWorker:
                     text=payload.get("text", ""),
                     voice_id=payload.get("voice_id", ""),
                     profile_base64=payload.get("profile_base64") or "",
+                    profile_path=payload.get("profile_path") or "",
                     language=payload.get("language") or "en",
                     story_type=payload.get("story_type", "user"),
                     is_kids_voice=payload.get("is_kids_voice", "false") == "true",
