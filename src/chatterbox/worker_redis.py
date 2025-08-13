@@ -75,7 +75,16 @@ class RedisWorker:
     def process_message(self, message_id: str, fields: Dict[str, str]) -> None:
         job_id = fields.get("job_id") or message_id
         job_type = fields.get("type")
-        payload = {k.split(":", 1)[1]: v for k, v in fields.items() if k.startswith("payload:")}
+        # Support both flattened payload:k=v and a single JSON 'payload' field
+        payload: Dict[str, Any] = {k.split(":", 1)[1]: v for k, v in fields.items() if k.startswith("payload:")}
+        if not payload and "payload" in fields:
+            try:
+                payload_json = json.loads(fields["payload"]) if isinstance(fields["payload"], str) else fields["payload"]
+                if isinstance(payload_json, dict):
+                    payload.update(payload_json)
+            except Exception:
+                logger.warning("Failed to parse JSON payload field; continuing with flattened keys only")
+        logger.info(f"Job {job_id} type={job_type} payloadKeys={list(payload.keys())}")
         self.set_status(job_id, "running")
 
         try:
@@ -83,6 +92,7 @@ class RedisWorker:
                 # Expect audio_base64, audio_format, name, language, is_kids_voice
                 audio_b64 = payload.get("audio_base64", "")
                 audio_bytes = base64.b64decode(audio_b64) if audio_b64 else b""
+                logger.info(f"VC payload snapshot: user_id={payload.get('user_id')} name={payload.get('name')} lang={payload.get('language')}")
                 result = clone_voice(
                     name=payload.get("name", "voice"),
                     audio_bytes=audio_bytes,

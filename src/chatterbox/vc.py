@@ -963,8 +963,10 @@ class ChatterboxVC:
             # /{base_path}/samples/{voice_id}.mp3      - Demo sample (compressed for size)
             
             # Common metadata for all files
+            user_id_meta = str((metadata or {}).get("user_id", ""))
+            logger.info(f"  - metadata.user_id for Storage: '{user_id_meta}'")
             common_meta = {
-                "user_id": str((metadata or {}).get("user_id", "")),
+                "user_id": user_id_meta,
                 "voice_id": voice_id,
                 "voice_name": voice_name or "",
                 "language": language,
