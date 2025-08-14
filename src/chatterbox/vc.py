@@ -40,6 +40,27 @@ except ImportError:
 REPO_ID = "ResembleAI/chatterbox"
 
 
+def make_safe_slug(value: str) -> str:
+    """Create a filesystem and URL-safe slug from a string."""
+    if value is None:
+        return ""
+    import re as _re
+    slug = value.strip().lower()
+    slug = _re.sub(r"\s+", "_", slug)
+    slug = _re.sub(r"[^a-z0-9_-]", "", slug)
+    slug = slug.strip("_-")
+    return slug or "voice"
+
+
+def build_voice_id_with_user(voice_name: str, user_id: str) -> str:
+    """Build voice id in the format voice_{name}_{userID} using sanitized parts."""
+    name_part = make_safe_slug(voice_name or "voice")
+    user_part = make_safe_slug(user_id or "")
+    if user_part:
+        return f"voice_{name_part}_{user_part}"
+    return f"voice_{name_part}"
+
+
 def generate_unique_voice_id(voice_name: str, length: int = 8, max_attempts: int = 10) -> str:
     """
     Generate a unique voice ID with random alphanumeric characters to prevent naming collisions.
@@ -911,11 +932,12 @@ class ChatterboxVC:
         import time
         start_time = time.time()
         
-        # Generate voice_id if not provided
+        # Generate voice_id if not provided, using user_id in the name
         if voice_id is None:
             if voice_name is None:
                 raise ValueError("Either voice_id or voice_name must be provided")
-            voice_id = generate_unique_voice_id(voice_name)
+            user_id_for_naming = str((metadata or {}).get("user_id", ""))
+            voice_id = build_voice_id_with_user(voice_name, user_id_for_naming)
         
         logger.info(f"🎤 ChatterboxVC.create_voice_clone called")
         logger.info(f"  - audio_file_path: {audio_file_path}")
@@ -957,7 +979,7 @@ class ChatterboxVC:
             # Step 4: Convert sample to MP3 and save
             logger.info(f"  - Step 4: Converting sample to MP3...")
             sample_mp3_bytes = self.tensor_to_mp3_bytes(sample_audio, self.sr, "96k")
-            sample_audio_path = f"{voice_id}_sample.mp3"
+            sample_audio_path = f"voice_{voice_id}_sample.mp3"
             
             # Save sample to file
             with open(sample_audio_path, 'wb') as f:
@@ -999,10 +1021,31 @@ class ChatterboxVC:
                 logger.info(f"    - Using regular folder: {base_path}")
             
             # Firebase Storage Structure:
-            # /{base_path}/profiles/{voice_id}.npy          - Voice profile for TTS
-            # /{base_path}/recorded/{voice_id}{ext}         - Cleaned source audio (original format)
-            # /{base_path}/samples/{voice_id}_sample.mp3    - Demo sample (compressed for size)
+            # /{base_path}/profiles/{voice_id}.npy               - Voice profile for TTS
+            # /{base_path}/recorded/{voice_id}_recorded{ext}     - Cleaned source audio (original format)
+            # /{base_path}/samples/voice_{voice_id}_sample.mp3   - Demo sample (compressed for size)
             
+            # Pre-create Firestore doc to surface entry immediately while uploads run
+            try:
+                client_pre = _init_firestore_client()
+                if client_pre:
+                    from google.cloud.firestore import SERVER_TIMESTAMP  # type: ignore
+                    doc_ref_pre = client_pre.collection("voice_profiles").document(voice_id)
+                    doc_ref_pre.set({
+                        "userId": (metadata or {}).get("user_id", ""),
+                        "voiceId": voice_id,
+                        "name": voice_name or voice_id,
+                        "language": language,
+                        "isKidsVoice": is_kids_voice,
+                        "status": "processing",
+                        "createdAt": SERVER_TIMESTAMP,
+                        "updatedAt": SERVER_TIMESTAMP,
+                        "metadata": metadata or {},
+                    }, merge=True)
+                    logger.info(f"🗄️  Firestore voice_profiles/{voice_id} pre-created (processing)")
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to pre-create Firestore voice_profiles doc: {e}")
+
             # Common metadata for all files
             user_id_meta = str((metadata or {}).get("user_id", ""))
             logger.info(f"  - metadata.user_id for Storage: '{user_id_meta}'")
@@ -1018,7 +1061,7 @@ class ChatterboxVC:
             # Upload sample audio to correct bucket path
             self.upload_to_firebase(
                 sample_audio_path, 
-                f"{base_path}/samples/{voice_id}_sample.mp3",
+                f"{base_path}/samples/voice_{voice_id}_sample.mp3",
                 content_type="audio/mpeg",
                 metadata={**common_meta, "file_kind": "sample"}
             )
@@ -1059,7 +1102,7 @@ class ChatterboxVC:
                 "voice_id": voice_id,
                 "profile_path": f"{voice_id}.npy",
                 "recorded_audio_path": f"{voice_id}_recorded{rec_ext}",
-                "sample_audio_path": f"{voice_id}_sample.mp3",      # Sample stays MP3 for size
+                "sample_audio_path": f"voice_{voice_id}_sample.mp3",      # Sample stays MP3 for size
                 "generation_time": generation_time,
                 "metadata": metadata or {},
                 "language": language
@@ -1070,6 +1113,34 @@ class ChatterboxVC:
             logger.info(f"  - Recorded audio path: {recorded_audio_path}")
             logger.info(f"  - Sample audio path: {sample_audio_path}")
             logger.info(f"  - Generation time: {generation_time:.2f}s")
+
+            # Also write/update Firestore voice_profiles document so the main app's /voices list updates in realtime
+            try:
+                client = _init_firestore_client()
+                if client:
+                    from google.cloud.firestore import SERVER_TIMESTAMP  # type: ignore
+                    doc_id = voice_id
+                    doc_ref = client.collection("voice_profiles").document(doc_id)
+                    doc_ref.set({
+                        "userId": (metadata or {}).get("user_id", ""),
+                        "voiceId": voice_id,
+                        "name": voice_name or voice_id,
+                        "language": language,
+                        "isKidsVoice": is_kids_voice,
+                        "status": "ready",
+                        "samplePath": f"{base_path}/samples/voice_{voice_id}_sample.mp3",
+                        "profilePath": f"{base_path}/profiles/{voice_id}.npy",
+                        "recordedPath": f"{base_path}/recorded/{voice_id}_recorded{rec_ext}",
+                        "createdAt": SERVER_TIMESTAMP,
+                        "updatedAt": SERVER_TIMESTAMP,
+                        "metadata": metadata or {},
+                    }, merge=True)
+                    result["firestore_profile_id"] = doc_id
+                    logger.info(f"🗄️  Firestore voice_profiles/{doc_id} upserted")
+                else:
+                    logger.warning("⚠️ Firestore client not initialized; skipping Firestore write")
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to write Firestore voice_profiles doc: {e}")
             
             # Clean up local files after Firebase upload (keep serverless environment clean)
             try:
@@ -1129,8 +1200,29 @@ class ChatterboxVC:
 
 
 def _init_firestore_client():
+    """Initialize Firestore using explicit service account if provided.
+
+    Prefers RUNPOD_SECRET_Firebase (JSON) to build credentials explicitly so we
+    don't rely on ambient ADC in the RunPod runtime. Falls back to default client.
+    """
     try:
+        import os
+        import json
         from google.cloud import firestore
+        from google.oauth2 import service_account  # type: ignore
+
+        sa_json_str = os.environ.get("RUNPOD_SECRET_Firebase")
+        if sa_json_str:
+            try:
+                sa_info = json.loads(sa_json_str)
+                credentials = service_account.Credentials.from_service_account_info(sa_info)
+                project_id = sa_info.get("project_id")
+                client = firestore.Client(project=project_id, credentials=credentials)
+                return client
+            except Exception as inner_e:
+                logger.warning(f"⚠️ Failed to init Firestore from RUNPOD_SECRET_Firebase; falling back to default ADC: {inner_e}")
+
+        # Fallback to default ADC
         return firestore.Client()
     except Exception as e:
         logger.error(f"❌ Failed to initialize Firestore client: {e}")
