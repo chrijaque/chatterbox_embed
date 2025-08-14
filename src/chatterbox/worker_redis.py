@@ -43,8 +43,8 @@ class RedisWorker:
         self.namespace = os.getenv("REDIS_NAMESPACE", "runpod")
         self.dlp_stream = os.getenv("REDIS_DLP_STREAM", "runpod:dlq")
 
-        use_tls = os.getenv("REDIS_USE_TLS", "true").lower() == "true"
-        self.client = redis.Redis.from_url(self.redis_url, decode_responses=True, ssl=use_tls)
+        # Rely on rediss:// scheme in REDIS_URL to enable TLS; avoid passing ssl kwarg for wider redis-py compatibility
+        self.client = redis.Redis.from_url(self.redis_url, decode_responses=True)
 
         # Ensure consumer group
         try:
