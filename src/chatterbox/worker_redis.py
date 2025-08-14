@@ -92,7 +92,18 @@ class RedisWorker:
                 # Expect audio_base64, audio_format, name, language, is_kids_voice
                 audio_b64 = payload.get("audio_base64", "")
                 audio_bytes = base64.b64decode(audio_b64) if audio_b64 else b""
-                logger.info(f"VC payload snapshot: user_id={payload.get('user_id')} name={payload.get('name')} lang={payload.get('language')}")
+                # Sanitized metadata logging (no raw base64 or PII beyond identifiers)
+                logger.info(
+                    "VC payload snapshot: "
+                    f"user_id={payload.get('user_id')} "
+                    f"profile_id={payload.get('profile_id')} "
+                    f"name={payload.get('name')} "
+                    f"language={payload.get('language')} "
+                    f"is_kids_voice={payload.get('is_kids_voice')} "
+                    f"model_type={payload.get('model_type', 'chatterbox')} "
+                    f"audio_format={payload.get('audio_format', 'wav')} "
+                    f"audio_b64_len={len(audio_b64)}"
+                )
                 result = clone_voice(
                     name=payload.get("name", "voice"),
                     audio_bytes=audio_bytes,
@@ -106,11 +117,27 @@ class RedisWorker:
                 self.set_status(job_id, "completed", **result)
             elif job_type == "tts":
                 tts = self._get_tts()
+                # Sanitized metadata logging for TTS
+                text = payload.get("text", "")
+                profile_b64 = payload.get("profile_base64") or ""
+                profile_path = payload.get("profile_path") or ""
+                logger.info(
+                    "TTS payload snapshot: "
+                    f"user_id={payload.get('user_id', '')} "
+                    f"story_id={payload.get('story_id', '')} "
+                    f"voice_id={payload.get('voice_id', '')} "
+                    f"language={payload.get('language') or 'en'} "
+                    f"story_type={payload.get('story_type', 'user')} "
+                    f"is_kids_voice={payload.get('is_kids_voice')} "
+                    f"model_type={payload.get('model_type', 'chatterbox')} "
+                    f"text_len={len(text)} "
+                    f"profile_base64_len={len(profile_b64)} "
+                    f"profile_path_present={bool(profile_path)}"
+                )
                 result = tts.generate_tts_story(
-                    text=payload.get("text", ""),
+                    text=text,
                     voice_id=payload.get("voice_id", ""),
-                    profile_base64=payload.get("profile_base64") or "",
-                    profile_path=payload.get("profile_path") or "",
+                    profile_base64=profile_b64,
                     language=payload.get("language") or "en",
                     story_type=payload.get("story_type", "user"),
                     is_kids_voice=payload.get("is_kids_voice", "false") == "true",
