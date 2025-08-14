@@ -540,8 +540,48 @@ class ChatterboxVC:
             elif final_duration < 2.0:  # Less than 2 seconds
                 logger.info(f"  - Short audio after cleaning: {final_duration:.2f}s")
             
-            # Save cleaned audio with high quality
-            sf.write(output_path, audio_final, sr, format='WAV', subtype='PCM_24')
+            # Save cleaned audio preserving original format when possible
+            base, ext = os.path.splitext(output_path)
+            ext_lower = ext.lower()
+            try:
+                if ext_lower in [".wav", ".flac", ".ogg", ".aiff", ".aif"]:
+                    # Use soundfile for lossless formats
+                    format_map = {
+                        ".wav": "WAV",
+                        ".flac": "FLAC",
+                        ".ogg": "OGG",
+                        ".aiff": "AIFF",
+                        ".aif": "AIFF",
+                    }
+                    sf.write(output_path, audio_final, sr, format=format_map[ext_lower])
+                elif ext_lower in [".mp3", ".m4a", ".aac", ".wma", ".opus"] and PYDUB_AVAILABLE:
+                    # Use pydub/ffmpeg for compressed formats
+                    import numpy as _np
+                    from pydub import AudioSegment as _AS
+                    int16_audio = (_np.clip(audio_final, -1.0, 1.0) * 32767).astype(_np.int16)
+                    seg = _AS(
+                        int16_audio.tobytes(),
+                        frame_rate=sr,
+                        sample_width=2,
+                        channels=1,
+                    )
+                    fmt = ext_lower.lstrip('.')
+                    # pydub uses 'mp4' container for m4a
+                    if fmt == "m4a":
+                        fmt = "mp4"
+                    seg.export(output_path, format=fmt)
+                else:
+                    # Fallback to high-quality WAV
+                    fallback_path = base + ".wav"
+                    sf.write(fallback_path, audio_final, sr, format='WAV')
+                    output_path = fallback_path
+                    logger.info(f"  - Unsupported target format '{ext_lower}', saved as WAV: {output_path}")
+            except Exception as save_err:
+                # Last-resort fallback
+                fallback_path = base + ".wav"
+                sf.write(fallback_path, audio_final, sr, format='WAV')
+                output_path = fallback_path
+                logger.warning(f"  - Failed to save in original format ({ext_lower}): {save_err}. Saved WAV: {output_path}")
             
             logger.info(f"✅ High-quality cleaning completed: {output_path}")
             logger.info(f"  - Original: {original_length/sr:.2f}s → Cleaned: {len(audio_final)/sr:.2f}s")
@@ -924,9 +964,10 @@ class ChatterboxVC:
                 f.write(sample_mp3_bytes)
             logger.info(f"    - Sample audio saved: {sample_audio_path}")
             
-            # Step 5: Keep cleaned audio as high-quality WAV for future use
+            # Step 5: Keep cleaned audio preserving original format for future use
             logger.info(f"  - Step 5: Preparing cleaned audio for storage...")
-            recorded_audio_path = f"{voice_id}_recorded.wav"
+            _, cleaned_ext = os.path.splitext(processed_audio_path)
+            recorded_audio_path = f"{voice_id}_recorded{cleaned_ext}"
             
             # If cleaned audio has a different path, rename it to the final path
             if processed_audio_path != recorded_audio_path:
@@ -958,9 +999,9 @@ class ChatterboxVC:
                 logger.info(f"    - Using regular folder: {base_path}")
             
             # Firebase Storage Structure:
-            # /{base_path}/profiles/{voice_id}.npy     - Voice profile for TTS
-            # /{base_path}/recorded/{voice_id}.wav     - High-quality cleaned source audio
-            # /{base_path}/samples/{voice_id}.mp3      - Demo sample (compressed for size)
+            # /{base_path}/profiles/{voice_id}.npy          - Voice profile for TTS
+            # /{base_path}/recorded/{voice_id}{ext}         - Cleaned source audio (original format)
+            # /{base_path}/samples/{voice_id}_sample.mp3    - Demo sample (compressed for size)
             
             # Common metadata for all files
             user_id_meta = str((metadata or {}).get("user_id", ""))
@@ -982,11 +1023,25 @@ class ChatterboxVC:
                 metadata={**common_meta, "file_kind": "sample"}
             )
             
-            # Upload recorded audio (cleaned WAV) to correct bucket path
+            # Upload recorded audio (cleaned, original format) to correct bucket path
+            rec_ext = os.path.splitext(recorded_audio_path)[1].lower()
+            mime_map = {
+                ".wav": "audio/wav",
+                ".flac": "audio/flac",
+                ".ogg": "audio/ogg",
+                ".aiff": "audio/aiff",
+                ".aif": "audio/aiff",
+                ".mp3": "audio/mpeg",
+                ".m4a": "audio/mp4",
+                ".aac": "audio/aac",
+                ".wma": "audio/x-ms-wma",
+                ".opus": "audio/opus",
+            }
+            rec_ct = mime_map.get(rec_ext, "application/octet-stream")
             self.upload_to_firebase(
                 recorded_audio_path, 
-                f"{base_path}/recorded/{voice_id}_recorded.wav",
-                content_type="audio/wav",
+                f"{base_path}/recorded/{voice_id}_recorded{rec_ext}",
+                content_type=rec_ct,
                 metadata={**common_meta, "file_kind": "recorded"}
             )
             
@@ -1003,7 +1058,7 @@ class ChatterboxVC:
                 "status": "success",
                 "voice_id": voice_id,
                 "profile_path": f"{voice_id}.npy",
-                "recorded_audio_path": f"{voice_id}_recorded.wav",  # Now WAV for best quality
+                "recorded_audio_path": f"{voice_id}_recorded{rec_ext}",
                 "sample_audio_path": f"{voice_id}_sample.mp3",      # Sample stays MP3 for size
                 "generation_time": generation_time,
                 "metadata": metadata or {},
@@ -1129,6 +1184,8 @@ def clone_voice(
             doc_ref = client.collection("voice_profiles").document(doc_id)
             from google.cloud.firestore import SERVER_TIMESTAMP  # type: ignore
             base_path = f"audio/voices/{language}{'/kids' if is_kids_voice else ''}"
+            # Match recorded file extension returned by create_voice_clone
+            rec_ext = _os.path.splitext(result.get('recorded_audio_path', ''))[1] or '.wav'
             doc_ref.set({
                 "userId": user_id,
                 "name": name,
@@ -1137,7 +1194,7 @@ def clone_voice(
                 "status": "ready",
                 "samplePath": f"{base_path}/samples/{result.get('voice_id')}_sample.mp3",
                 "profilePath": f"{base_path}/profiles/{result.get('voice_id')}.npy",
-                "recordedPath": f"{base_path}/recorded/{result.get('voice_id')}_recorded.wav",
+                "recordedPath": f"{base_path}/recorded/{result.get('voice_id')}_recorded{rec_ext}",
                 "createdAt": SERVER_TIMESTAMP,
                 "updatedAt": SERVER_TIMESTAMP,
                 "metadata": result.get("metadata", {}),
