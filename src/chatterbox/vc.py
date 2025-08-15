@@ -608,8 +608,8 @@ class ChatterboxVC:
         logger.info(f"🔬 High-quality audio cleaning: {audio_file_path}")
         
         if output_path is None:
-            base, ext = os.path.splitext(audio_file_path)
-            output_path = f"{base}_cleaned{ext}"
+            base, _ext = os.path.splitext(audio_file_path)
+            output_path = f"{base}_cleaned.wav"
         
         try:
             # Import required libraries
@@ -674,48 +674,8 @@ class ChatterboxVC:
             elif final_duration < 2.0:  # Less than 2 seconds
                 logger.info(f"  - Short audio after cleaning: {final_duration:.2f}s")
             
-            # Save cleaned audio preserving original format when possible
-            base, ext = os.path.splitext(output_path)
-            ext_lower = ext.lower()
-            try:
-                if ext_lower in [".wav", ".flac", ".ogg", ".aiff", ".aif"]:
-                    # Use soundfile for lossless formats
-                    format_map = {
-                        ".wav": "WAV",
-                        ".flac": "FLAC",
-                        ".ogg": "OGG",
-                        ".aiff": "AIFF",
-                        ".aif": "AIFF",
-                    }
-                    sf.write(output_path, audio_final, sr, format=format_map[ext_lower])
-                elif ext_lower in [".mp3", ".m4a", ".aac", ".wma", ".opus"] and PYDUB_AVAILABLE:
-                    # Use pydub/ffmpeg for compressed formats
-                    import numpy as _np
-                    from pydub import AudioSegment as _AS
-                    int16_audio = (_np.clip(audio_final, -1.0, 1.0) * 32767).astype(_np.int16)
-                    seg = _AS(
-                        int16_audio.tobytes(),
-                        frame_rate=sr,
-                        sample_width=2,
-                        channels=1,
-                    )
-                    fmt = ext_lower.lstrip('.')
-                    # pydub uses 'mp4' container for m4a
-                    if fmt == "m4a":
-                        fmt = "mp4"
-                    seg.export(output_path, format=fmt)
-                else:
-                    # Fallback to high-quality WAV
-                    fallback_path = base + ".wav"
-                    sf.write(fallback_path, audio_final, sr, format='WAV')
-                    output_path = fallback_path
-                    logger.info(f"  - Unsupported target format '{ext_lower}', saved as WAV: {output_path}")
-            except Exception as save_err:
-                # Last-resort fallback
-                fallback_path = base + ".wav"
-                sf.write(fallback_path, audio_final, sr, format='WAV')
-                output_path = fallback_path
-                logger.warning(f"  - Failed to save in original format ({ext_lower}): {save_err}. Saved WAV: {output_path}")
+            # Always save cleaned audio as high-quality WAV (lossless) for best embedding quality
+            sf.write(output_path, audio_final, sr, format='WAV', subtype='PCM_24')
             
             logger.info(f"✅ High-quality cleaning completed: {output_path}")
             logger.info(f"  - Original: {original_length/sr:.2f}s → Cleaned: {len(audio_final)/sr:.2f}s")
@@ -1117,8 +1077,7 @@ class ChatterboxVC:
                 logger.info(f"    - Provided recorded_path pointer: {recorded_pointer}")
             else:
                 # Fallback to previous behavior: keep cleaned audio locally for upload
-                _, cleaned_ext = os.path.splitext(processed_audio_path)
-                recorded_audio_path_local = f"{voice_id}_recorded{cleaned_ext}"
+                recorded_audio_path_local = f"{voice_id}_recorded.wav"
                 if processed_audio_path != recorded_audio_path_local:
                     import shutil
                     shutil.move(processed_audio_path, recorded_audio_path_local)
@@ -1220,7 +1179,7 @@ class ChatterboxVC:
                     rec_ext = ".wav"
             else:
                 # Proceed with upload as before
-                rec_ext = os.path.splitext(recorded_audio_path_local)[1].lower()
+                rec_ext = ".wav"
                 rec_ct = mime_map.get(rec_ext, "application/octet-stream")
                 self.upload_to_firebase(
                     recorded_audio_path_local, 
