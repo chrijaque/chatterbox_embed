@@ -1000,6 +1000,13 @@ class AdvancedStitcher:
 
         # Global pause scaling to control narration pace (1.0 = baseline)
         self.global_pause_factor = 1.0
+
+        # Final loudness normalization (EBU R128) configuration
+        self.enable_loudness_normalization = True
+        self.loudness_target_lufs = -19.4   # Integrated loudness target (LUFS)
+        self.loudness_target_tp = -1.0      # True peak target (dBTP)
+        self.loudness_target_lra = 11.0     # Target Loudness Range (LU)
+        self.loudness_method = "ffmpeg"     # "ffmpeg" | "pyloudnorm" (fallback)
     
     def calculate_smart_pause(self, chunk_info: ChunkInfo, next_chunk_info: Optional[ChunkInfo] = None) -> int:
         """Calculate optimal pause duration based on context"""
@@ -1066,7 +1073,7 @@ class AdvancedStitcher:
         
         return processed_segment
     
-    def normalize_segment_levels(self, segment, target_lufs: float = -23.0):
+    def normalize_segment_levels(self, segment, target_lufs: float = -19.4):
         """Normalize audio segment to target LUFS level"""
         try:
             # Use pydub's normalize function as a starting point
@@ -1090,6 +1097,102 @@ class AdvancedStitcher:
         except Exception as e:
             logger.warning(f"Level normalization failed: {e}, using basic normalize")
             return effects.normalize(segment)
+
+    def _ffmpeg_available(self) -> bool:
+        try:
+            import shutil
+            return shutil.which("ffmpeg") is not None
+        except Exception:
+            return False
+
+    def _run_ffmpeg_loudnorm(self, input_path: str, output_path: str) -> bool:
+        """Run two-pass ffmpeg loudnorm to achieve target LUFS/TP/LRA. Returns True on success."""
+        import subprocess
+        import json
+        import re
+
+        # Pass 1: Measure
+        measure_cmd = [
+            "ffmpeg", "-hide_banner", "-nostats", "-y",
+            "-i", input_path,
+            "-af", f"loudnorm=I={self.loudness_target_lufs}:TP={self.loudness_target_tp}:LRA={self.loudness_target_lra}:print_format=json",
+            "-f", "null", "-"
+        ]
+        try:
+            proc = subprocess.run(measure_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            stderr = proc.stderr or ""
+            # Extract JSON from stderr
+            # Find the last JSON object in stderr
+            json_matches = list(re.finditer(r"\{[\s\S]*?\}", stderr))
+            if not json_matches:
+                return False
+            json_str = json_matches[-1].group(0)
+            stats = json.loads(json_str)
+            measured_I = stats.get("input_i")
+            measured_LRA = stats.get("input_lra")
+            measured_TP = stats.get("input_tp")
+            measured_thresh = stats.get("input_thresh")
+            offset = stats.get("target_offset")
+
+            if any(v is None for v in [measured_I, measured_LRA, measured_TP, measured_thresh, offset]):
+                return False
+
+            # Pass 2: Apply
+            apply_cmd = [
+                "ffmpeg", "-hide_banner", "-nostats", "-y",
+                "-i", input_path,
+                "-af",
+                (
+                    "loudnorm="
+                    f"I={self.loudness_target_lufs}:TP={self.loudness_target_tp}:LRA={self.loudness_target_lra}:"
+                    f"measured_I={measured_I}:measured_LRA={measured_LRA}:measured_TP={measured_TP}:"
+                    f"measured_thresh={measured_thresh}:offset={offset}:linear=true:print_format=summary"
+                ),
+                output_path,
+            ]
+            proc2 = subprocess.run(apply_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            return proc2.returncode == 0
+        except Exception:
+            return False
+
+    def _fallback_simple_loudness(self, input_path: str, output_path: str) -> bool:
+        """Fallback: Apply approximate gain to move towards target loudness and cap peak.
+        Not true LUFS, but improves perceived level if ffmpeg/pyloudnorm are unavailable.
+        """
+        try:
+            from pydub import AudioSegment
+            seg = AudioSegment.from_wav(input_path)
+            # Apply a conservative gain towards target (approx +3.6 dB)
+            seg = seg.apply_gain(3.6)
+            # Hard cap peaks to ~ -1 dBFS by reducing if necessary
+            peak_over = seg.max_dBFS + 1.0  # positive if over -1 dBFS
+            if peak_over > 0:
+                seg = seg.apply_gain(-peak_over)
+            seg.export(output_path, format="wav")
+            return True
+        except Exception:
+            return False
+
+    def apply_loudness_normalization_file(self, input_path: str) -> str:
+        """Apply final loudness normalization to file and return path to normalized file.
+        Returns input_path if disabled or on failure.
+        """
+        if not self.enable_loudness_normalization:
+            return input_path
+        try:
+            import os
+            base, ext = os.path.splitext(input_path)
+            output_path = f"{base}_loudnorm.wav"
+            # Prefer ffmpeg two-pass loudnorm
+            if self.loudness_method == "ffmpeg" and self._ffmpeg_available():
+                ok = self._run_ffmpeg_loudnorm(input_path, output_path)
+                if ok:
+                    return output_path
+            # Fallback to simple gain approach
+            ok = self._fallback_simple_loudness(input_path, output_path)
+            return output_path if ok else input_path
+        except Exception:
+            return input_path
     
     def advanced_stitch(self, wav_paths: List[str], chunk_infos: List[ChunkInfo], 
                        output_path: str) -> Tuple[torch.Tensor, int, float]:
@@ -1157,10 +1260,17 @@ class AdvancedStitcher:
             # Export to file
             logger.info(f"🎼 Exporting stitched audio to: {output_path}")
             normalized_combined.export(output_path, format="wav")
-            
-            # Load back as tensor for return
-            audio_tensor, sample_rate = torchaudio.load(output_path)
-            duration = len(normalized_combined) / 1000.0
+
+            # Final loudness normalization to target LUFS/TP/LRA
+            ln_path = self.apply_loudness_normalization_file(output_path)
+            if ln_path != output_path:
+                logger.info(f"🎚️ Applied loudness normalization: {ln_path}")
+            else:
+                logger.info(f"🎚️ Loudness normalization skipped or failed; using original export")
+
+            # Load back as tensor for return (use loudnorm output if available)
+            audio_tensor, sample_rate = torchaudio.load(ln_path)
+            duration = float(audio_tensor.shape[-1]) / float(sample_rate)
             
             # Log stitching statistics
             total_pause_time = sum(stat["pause_after_ms"] for stat in processing_stats) / 1000.0

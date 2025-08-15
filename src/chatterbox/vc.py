@@ -187,6 +187,13 @@ class ChatterboxVC:
         
         logger.info(f"✅ ChatterboxVC initialized successfully")
         logger.info(f"  - Available methods: {[m for m in dir(self) if not m.startswith('_')]}")
+
+        # Final loudness normalization configuration for generated samples
+        self.enable_loudness_normalization = True
+        self.loudness_target_lufs = -19.4  # Integrated loudness (LUFS)
+        self.loudness_target_tp = -1.0     # True peak (dBTP)
+        self.loudness_target_lra = 11.0    # Loudness range (LU)
+        self.loudness_method = "ffmpeg"    # "ffmpeg" with two-pass loudnorm (preferred)
         
         # Debug: Check for specific methods
         expected_vc_methods = [
@@ -301,6 +308,112 @@ class ChatterboxVC:
         result = cls.from_local(Path(local_path).parent, device)
         logger.info(f"✅ ChatterboxVC.from_pretrained completed")
         return result
+
+    def _ffmpeg_available(self) -> bool:
+        try:
+            import shutil
+            return shutil.which("ffmpeg") is not None
+        except Exception:
+            return False
+
+    def _run_ffmpeg_loudnorm(self, input_path: str, output_path: str) -> bool:
+        """Run two-pass ffmpeg loudnorm to achieve target LUFS/TP/LRA. Returns True on success."""
+        import subprocess
+        import json
+        import re
+
+        # Pass 1: Measure
+        measure_cmd = [
+            "ffmpeg", "-hide_banner", "-nostats", "-y",
+            "-i", input_path,
+            "-af", f"loudnorm=I={self.loudness_target_lufs}:TP={self.loudness_target_tp}:LRA={self.loudness_target_lra}:print_format=json",
+            "-f", "null", "-"
+        ]
+        try:
+            proc = subprocess.run(measure_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            stderr = proc.stderr or ""
+            json_matches = list(re.finditer(r"\{[\s\S]*?\}", stderr))
+            if not json_matches:
+                return False
+            stats = json.loads(json_matches[-1].group(0))
+            measured_I = stats.get("input_i")
+            measured_LRA = stats.get("input_lra")
+            measured_TP = stats.get("input_tp")
+            measured_thresh = stats.get("input_thresh")
+            offset = stats.get("target_offset")
+            if any(v is None for v in [measured_I, measured_LRA, measured_TP, measured_thresh, offset]):
+                return False
+
+            # Pass 2: Apply with measured parameters
+            apply_cmd = [
+                "ffmpeg", "-hide_banner", "-nostats", "-y",
+                "-i", input_path,
+                "-af",
+                (
+                    "loudnorm="
+                    f"I={self.loudness_target_lufs}:TP={self.loudness_target_tp}:LRA={self.loudness_target_lra}:"
+                    f"measured_I={measured_I}:measured_LRA={measured_LRA}:measured_TP={measured_TP}:"
+                    f"measured_thresh={measured_thresh}:offset={offset}:linear=true:print_format=summary"
+                ),
+                output_path,
+            ]
+            proc2 = subprocess.run(apply_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            return proc2.returncode == 0
+        except Exception:
+            return False
+
+    def _fallback_simple_loudness(self, input_path: str, output_path: str) -> bool:
+        """Fallback loudness step: increase level and cap peaks. Not true EBU R128 but safe."""
+        try:
+            from pydub import AudioSegment
+            seg = AudioSegment.from_wav(input_path)
+            # Conservative gain towards -19.4 LUFS target (~+3.6 dB from -23)
+            seg = seg.apply_gain(3.6)
+            peak_over = seg.max_dBFS + 1.0
+            if peak_over > 0:
+                seg = seg.apply_gain(-peak_over)
+            seg.export(output_path, format="wav")
+            return True
+        except Exception:
+            return False
+
+    def apply_loudness_normalization_tensor(self, audio_tensor: torch.Tensor, sample_rate: int) -> torch.Tensor:
+        """Normalize loudness of a tensor to target LUFS using ffmpeg two-pass (preferred)."""
+        if not self.enable_loudness_normalization:
+            return audio_tensor
+        import tempfile
+        import os as _os
+        try:
+            # Write to temp WAV
+            tmp_in = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+            tmp_in.close()
+            torchaudio.save(tmp_in.name, audio_tensor, sample_rate)
+
+            # Normalize to temp out
+            base, _ = _os.path.splitext(tmp_in.name)
+            tmp_out = base + "_loudnorm.wav"
+
+            ok = False
+            if self.loudness_method == "ffmpeg" and self._ffmpeg_available():
+                ok = self._run_ffmpeg_loudnorm(tmp_in.name, tmp_out)
+            if not ok:
+                ok = self._fallback_simple_loudness(tmp_in.name, tmp_out)
+
+            # Load result
+            out_path = tmp_out if ok else tmp_in.name
+            audio_norm, _ = torchaudio.load(out_path)
+
+            # Cleanup
+            for p in [tmp_in.name, tmp_out]:
+                try:
+                    if _os.path.exists(p):
+                        _os.unlink(p)
+                except Exception:
+                    pass
+
+            return audio_norm
+        except Exception:
+            return audio_tensor
 
     def set_target_voice(self, wav_fpath):
         """Set target voice from audio file path, creating both S3Gen and VoiceEncoder embeddings."""
@@ -975,6 +1088,13 @@ class ChatterboxVC:
                 logger.info(f"    - Using default sample text: '{default_sample_text}'")
                 sample_audio = self.tts(default_sample_text)
             logger.info(f"    - Sample audio generated, shape: {sample_audio.shape}")
+
+            # Apply final loudness normalization to sample
+            try:
+                sample_audio = self.apply_loudness_normalization_tensor(sample_audio, self.sr)
+                logger.info("    - Sample loudness normalized to target LUFS")
+            except Exception as _e_ln:
+                logger.warning(f"    - Sample loudness normalization skipped: {_e_ln}")
             
             # Step 4: Convert sample to MP3 and save
             logger.info(f"  - Step 4: Converting sample to MP3...")
@@ -986,20 +1106,25 @@ class ChatterboxVC:
                 f.write(sample_mp3_bytes)
             logger.info(f"    - Sample audio saved: {sample_audio_path}")
             
-            # Step 5: Keep cleaned audio preserving original format for future use
-            logger.info(f"  - Step 5: Preparing cleaned audio for storage...")
-            _, cleaned_ext = os.path.splitext(processed_audio_path)
-            recorded_audio_path = f"{voice_id}_recorded{cleaned_ext}"
-            
-            # If cleaned audio has a different path, rename it to the final path
-            if processed_audio_path != recorded_audio_path:
-                import shutil
-                shutil.move(processed_audio_path, recorded_audio_path)
-                logger.info(f"    - Cleaned audio renamed to: {recorded_audio_path}")
+            # Step 5: Prepare recorded audio path semantics
+            logger.info(f"  - Step 5: Preparing recorded audio path semantics...")
+            recorded_audio_path_local = None
+            recorded_pointer = None
+            recorded_in_metadata = (metadata or {}).get('recorded_path')
+            if recorded_in_metadata:
+                # A client-supplied recorded Storage path exists → do NOT upload duplicate
+                recorded_pointer = str(recorded_in_metadata)
+                logger.info(f"    - Provided recorded_path pointer: {recorded_pointer}")
             else:
-                logger.info(f"    - Using cleaned audio: {recorded_audio_path}")
-            
-            # Note: We keep the cleaned WAV file (don't clean it up) for Firebase upload
+                # Fallback to previous behavior: keep cleaned audio locally for upload
+                _, cleaned_ext = os.path.splitext(processed_audio_path)
+                recorded_audio_path_local = f"{voice_id}_recorded{cleaned_ext}"
+                if processed_audio_path != recorded_audio_path_local:
+                    import shutil
+                    shutil.move(processed_audio_path, recorded_audio_path_local)
+                    logger.info(f"    - Cleaned audio renamed to: {recorded_audio_path_local}")
+                else:
+                    logger.info(f"    - Using cleaned audio: {recorded_audio_path_local}")
             
             generation_time = time.time() - start_time
             
@@ -1066,8 +1191,8 @@ class ChatterboxVC:
                 metadata={**common_meta, "file_kind": "sample"}
             )
             
-            # Upload recorded audio (cleaned, original format) to correct bucket path
-            rec_ext = os.path.splitext(recorded_audio_path)[1].lower()
+            # Upload recorded audio only if we didn't receive a pointer
+            rec_ext = None
             mime_map = {
                 ".wav": "audio/wav",
                 ".flac": "audio/flac",
@@ -1080,13 +1205,30 @@ class ChatterboxVC:
                 ".wma": "audio/x-ms-wma",
                 ".opus": "audio/opus",
             }
-            rec_ct = mime_map.get(rec_ext, "application/octet-stream")
-            self.upload_to_firebase(
-                recorded_audio_path, 
-                f"{base_path}/recorded/{voice_id}_recorded{rec_ext}",
-                content_type=rec_ct,
-                metadata={**common_meta, "file_kind": "recorded"}
-            )
+            recorded_path_for_response = None
+            if recorded_pointer:
+                # Use pointer directly in outputs; skip upload
+                recorded_path_for_response = recorded_pointer
+                logger.info("    - Skipping recorded upload (client-provided recorded_path)")
+                # Try to infer extension for Firestore doc
+                _lp = recorded_pointer.lower()
+                for ext in mime_map.keys():
+                    if _lp.endswith(ext):
+                        rec_ext = ext
+                        break
+                if not rec_ext:
+                    rec_ext = ".wav"
+            else:
+                # Proceed with upload as before
+                rec_ext = os.path.splitext(recorded_audio_path_local)[1].lower()
+                rec_ct = mime_map.get(rec_ext, "application/octet-stream")
+                self.upload_to_firebase(
+                    recorded_audio_path_local, 
+                    f"{base_path}/recorded/{voice_id}_recorded{rec_ext}",
+                    content_type=rec_ct,
+                    metadata={**common_meta, "file_kind": "recorded"}
+                )
+                recorded_path_for_response = f"{voice_id}_recorded{rec_ext}"
             
             # Upload voice profile to correct bucket path
             self.upload_to_firebase(
@@ -1101,7 +1243,7 @@ class ChatterboxVC:
                 "status": "success",
                 "voice_id": voice_id,
                 "profile_path": f"{voice_id}.npy",
-                "recorded_audio_path": f"{voice_id}_recorded{rec_ext}",
+                "recorded_audio_path": recorded_path_for_response,
                 "sample_audio_path": f"voice_{voice_id}_sample.mp3",      # Sample stays MP3 for size
                 "generation_time": generation_time,
                 "metadata": metadata or {},
@@ -1130,7 +1272,9 @@ class ChatterboxVC:
                         "status": "ready",
                         "samplePath": f"{base_path}/samples/voice_{voice_id}_sample.mp3",
                         "profilePath": f"{base_path}/profiles/{voice_id}.npy",
-                        "recordedPath": f"{base_path}/recorded/{voice_id}_recorded{rec_ext}",
+                        "recordedPath": (
+                            recorded_pointer if recorded_pointer else f"{base_path}/recorded/{voice_id}_recorded{rec_ext}"
+                        ),
                         "createdAt": SERVER_TIMESTAMP,
                         "updatedAt": SERVER_TIMESTAMP,
                         "metadata": metadata or {},
@@ -1144,7 +1288,10 @@ class ChatterboxVC:
             
             # Clean up local files after Firebase upload (keep serverless environment clean)
             try:
-                for file_path in [profile_path, recorded_audio_path, sample_audio_path]:
+                local_cleanup = [profile_path, sample_audio_path]
+                if recorded_audio_path_local:
+                    local_cleanup.append(recorded_audio_path_local)
+                for file_path in local_cleanup:
                     if os.path.exists(file_path):
                         os.remove(file_path)
                         logger.info(f"  - Cleaned up local file: {file_path}")
@@ -1187,6 +1334,12 @@ class ChatterboxVC:
             
             # Generate audio
             audio_tensor = self.tts(text)
+            # Apply final loudness normalization for sample generation API
+            try:
+                audio_tensor = self.apply_loudness_normalization_tensor(audio_tensor, self.sr)
+                logger.info("    - Normalized voice sample loudness to target LUFS")
+            except Exception as _e_ln:
+                logger.warning(f"    - Loudness normalization skipped: {_e_ln}")
             
             # Convert to MP3 bytes
             mp3_bytes = self.tensor_to_mp3_bytes(audio_tensor, self.sr, "96k")
