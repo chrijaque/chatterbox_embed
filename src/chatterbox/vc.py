@@ -1252,7 +1252,7 @@ class ChatterboxVC:
             
             logger.info(f"✅ Voice clone created successfully!")
             logger.info(f"  - Profile path: {profile_path}")
-            logger.info(f"  - Recorded audio path: {recorded_audio_path}")
+            logger.info(f"  - Recorded audio path: {recorded_path_for_response}")
             logger.info(f"  - Sample audio path: {sample_audio_path}")
             logger.info(f"  - Generation time: {generation_time:.2f}s")
 
