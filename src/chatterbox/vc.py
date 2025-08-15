@@ -195,8 +195,8 @@ class ChatterboxVC:
         self.loudness_target_lra = 11.0    # Loudness range (LU)
         self.loudness_method = "ffmpeg"    # "ffmpeg" with two-pass loudnorm (preferred)
 
-        # Audio cleaning in cloning pipeline (disable by default to avoid over-processing)
-        self.enable_audio_cleaning = False
+        # Audio cleaning in cloning pipeline (enabled; this was the previous behavior)
+        self.enable_audio_cleaning = True
         
         # Debug: Check for specific methods
         expected_vc_methods = [

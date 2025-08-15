@@ -1001,8 +1001,8 @@ class AdvancedStitcher:
         # Global pause scaling to control narration pace (1.0 = baseline)
         self.global_pause_factor = 1.0
 
-        # Final loudness normalization (EBU R128) configuration
-        self.enable_loudness_normalization = True
+        # Final loudness normalization (EBU R128) configuration (default OFF to avoid impacting voice color)
+        self.enable_loudness_normalization = False
         self.loudness_target_lufs = -19.4   # Integrated loudness target (LUFS)
         self.loudness_target_tp = -1.0      # True peak target (dBTP)
         self.loudness_target_lra = 11.0     # Target Loudness Range (LU)
@@ -1073,7 +1073,7 @@ class AdvancedStitcher:
         
         return processed_segment
     
-    def normalize_segment_levels(self, segment, target_lufs: float = -19.4):
+    def normalize_segment_levels(self, segment, target_lufs: float = -23.0):
         """Normalize audio segment to target LUFS level"""
         try:
             # Use pydub's normalize function as a starting point
