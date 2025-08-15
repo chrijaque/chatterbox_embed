@@ -188,12 +188,15 @@ class ChatterboxVC:
         logger.info(f"✅ ChatterboxVC initialized successfully")
         logger.info(f"  - Available methods: {[m for m in dir(self) if not m.startswith('_')]}")
 
-        # Final loudness normalization configuration for generated samples
-        self.enable_loudness_normalization = True
+        # Final loudness normalization configuration for generated samples (default OFF to avoid impact)
+        self.enable_loudness_normalization = False
         self.loudness_target_lufs = -19.4  # Integrated loudness (LUFS)
         self.loudness_target_tp = -1.0     # True peak (dBTP)
         self.loudness_target_lra = 11.0    # Loudness range (LU)
         self.loudness_method = "ffmpeg"    # "ffmpeg" with two-pass loudnorm (preferred)
+
+        # Audio cleaning in cloning pipeline (disable by default to avoid over-processing)
+        self.enable_audio_cleaning = False
         
         # Debug: Check for specific methods
         expected_vc_methods = [
@@ -1020,10 +1023,14 @@ class ChatterboxVC:
         logger.info(f"  - sample_text: {sample_text}")
         
         try:
-            # Step 0: Apply high-quality audio cleaning
-            logger.info(f"  - Step 0: Applying high-quality audio cleaning...")
-            processed_audio_path = self.clean_audio(audio_file_path)
-            logger.info(f"    - Audio cleaning completed: {processed_audio_path}")
+            # Step 0: Optional high-quality audio cleaning (disabled by default)
+            if self.enable_audio_cleaning:
+                logger.info(f"  - Step 0: Applying high-quality audio cleaning...")
+                processed_audio_path = self.clean_audio(audio_file_path)
+                logger.info(f"    - Audio cleaning completed: {processed_audio_path}")
+            else:
+                processed_audio_path = audio_file_path
+                logger.info(f"  - Step 0: Skipping audio cleaning (using original reference)")
             
             # Step 1: Save voice profile from (cleaned) audio
             logger.info(f"  - Step 1: Saving voice profile...")
@@ -1078,12 +1085,23 @@ class ChatterboxVC:
             else:
                 # Fallback to previous behavior: keep cleaned audio locally for upload
                 recorded_audio_path_local = f"{voice_id}_recorded.wav"
-                if processed_audio_path != recorded_audio_path_local:
+                try:
+                    # If source is already WAV, copy/move; otherwise transcode to WAV
+                    _src_ext = os.path.splitext(processed_audio_path)[1].lower()
+                    if _src_ext == ".wav":
+                        if processed_audio_path != recorded_audio_path_local:
+                            import shutil
+                            shutil.move(processed_audio_path, recorded_audio_path_local)
+                        logger.info(f"    - Recorded source is WAV → {recorded_audio_path_local}")
+                    else:
+                        logger.info(f"    - Transcoding recorded source {_src_ext} → WAV")
+                        audio_tensor, sr = torchaudio.load(processed_audio_path)
+                        torchaudio.save(recorded_audio_path_local, audio_tensor, sr)
+                        logger.info(f"    - Transcoded to WAV: {recorded_audio_path_local} @ {sr}Hz")
+                except Exception as _e_conv:
+                    logger.warning(f"    - Failed to convert to WAV, fallback to move: {_e_conv}")
                     import shutil
                     shutil.move(processed_audio_path, recorded_audio_path_local)
-                    logger.info(f"    - Cleaned audio renamed to: {recorded_audio_path_local}")
-                else:
-                    logger.info(f"    - Using cleaned audio: {recorded_audio_path_local}")
             
             generation_time = time.time() - start_time
             
