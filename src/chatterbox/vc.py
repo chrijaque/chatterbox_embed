@@ -1038,7 +1038,7 @@ class ChatterboxVC:
             safe_user = make_safe_slug(user_id_meta or "user")
             profile_filename = (metadata or {}).get("profile_filename") or f"voice_{safe_name}_{safe_user}.npy"
             sample_filename = (metadata or {}).get("sample_filename") or f"sample_{safe_name}_{safe_user}.mp3"
-            recorded_filename = f"recording_{safe_name}_{safe_user}.wav"
+            recorded_filename = (metadata or {}).get("recorded_filename") or f"recording_{safe_name}_{safe_user}.wav"
 
             # Step 1: Save voice profile from (cleaned) audio (local temp), will upload with standardized name
             logger.info(f"  - Step 1: Saving voice profile...")
