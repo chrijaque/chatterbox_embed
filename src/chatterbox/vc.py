@@ -1032,15 +1032,23 @@ class ChatterboxVC:
                 processed_audio_path = audio_file_path
                 logger.info(f"  - Step 0: Skipping audio cleaning (using original reference)")
             
-            # Step 1: Save voice profile from (cleaned) audio
+            # Derive standardized filenames using safe voice name and user id
+            user_id_meta = str((metadata or {}).get("user_id", ""))
+            safe_name = make_safe_slug(voice_name or "voice")
+            safe_user = make_safe_slug(user_id_meta or "user")
+            profile_filename = (metadata or {}).get("profile_filename") or f"voice_{safe_name}_{safe_user}.npy"
+            sample_filename = (metadata or {}).get("sample_filename") or f"sample_{safe_name}_{safe_user}.mp3"
+            recorded_filename = f"recording_{safe_name}_{safe_user}.wav"
+
+            # Step 1: Save voice profile from (cleaned) audio (local temp), will upload with standardized name
             logger.info(f"  - Step 1: Saving voice profile...")
-            profile_path = f"{voice_id}.npy"
-            self.save_voice_profile(processed_audio_path, profile_path)
-            logger.info(f"    - Voice profile saved: {profile_path}")
+            profile_local_path = f"{voice_id}.npy"
+            self.save_voice_profile(processed_audio_path, profile_local_path)
+            logger.info(f"    - Voice profile saved: {profile_local_path}")
             
             # Step 2: Set voice profile
             logger.info(f"  - Step 2: Setting voice profile...")
-            self.set_voice_profile(profile_path)
+            self.set_voice_profile(profile_local_path)
             logger.info(f"    - Voice profile set successfully")
             
             # Step 3: Generate sample audio
@@ -1063,15 +1071,15 @@ class ChatterboxVC:
             except Exception as _e_ln:
                 logger.warning(f"    - Sample loudness normalization skipped: {_e_ln}")
             
-            # Step 4: Convert sample to MP3 and save
+            # Step 4: Convert sample to MP3 and save (local temp)
             logger.info(f"  - Step 4: Converting sample to MP3...")
             sample_mp3_bytes = self.tensor_to_mp3_bytes(sample_audio, self.sr, "96k")
-            sample_audio_path = f"voice_{voice_id}_sample.mp3"
+            sample_local_path = f"{voice_id}_sample.mp3"
             
             # Save sample to file
-            with open(sample_audio_path, 'wb') as f:
+            with open(sample_local_path, 'wb') as f:
                 f.write(sample_mp3_bytes)
-            logger.info(f"    - Sample audio saved: {sample_audio_path}")
+            logger.info(f"    - Sample audio saved: {sample_local_path}")
             
             # Step 5: Prepare recorded audio path semantics
             logger.info(f"  - Step 5: Preparing recorded audio path semantics...")
@@ -1084,7 +1092,7 @@ class ChatterboxVC:
                 logger.info(f"    - Provided recorded_path pointer: {recorded_pointer}")
             else:
                 # Fallback to previous behavior: keep cleaned audio locally for upload
-                recorded_audio_path_local = f"{voice_id}_recorded.wav"
+                recorded_audio_path_local = recorded_filename
                 try:
                     # If source is already WAV, copy/move; otherwise transcode to WAV
                     _src_ext = os.path.splitext(processed_audio_path)[1].lower()
@@ -1122,10 +1130,10 @@ class ChatterboxVC:
                 base_path = f"audio/voices/{language}"
                 logger.info(f"    - Using regular folder: {base_path}")
             
-            # Firebase Storage Structure:
-            # /{base_path}/profiles/{voice_id}.npy               - Voice profile for TTS
-            # /{base_path}/recorded/{voice_id}_recorded{ext}     - Cleaned source audio (original format)
-            # /{base_path}/samples/voice_{voice_id}_sample.mp3   - Demo sample (compressed for size)
+            # Firebase Storage Structure (standardized):
+            # /{base_path}/profiles/voice_{safe_name}_{user_id}.npy
+            # /{base_path}/recorded/recording_{safe_name}_{user_id}.wav
+            # /{base_path}/samples/sample_{safe_name}_{user_id}.mp3
             
             # Pre-create Firestore doc to surface entry immediately while uploads run
             try:
@@ -1160,10 +1168,10 @@ class ChatterboxVC:
                 "model_type": (metadata or {}).get("model_type", "chatterbox"),
             }
 
-            # Upload sample audio to correct bucket path
+            # Upload sample audio to standardized bucket path
             self.upload_to_firebase(
-                sample_audio_path, 
-                f"{base_path}/samples/voice_{voice_id}_sample.mp3",
+                sample_local_path,
+                f"{base_path}/samples/{sample_filename}",
                 content_type="audio/mpeg",
                 metadata={**common_meta, "file_kind": "sample"}
             )
@@ -1200,17 +1208,17 @@ class ChatterboxVC:
                 rec_ext = ".wav"
                 rec_ct = mime_map.get(rec_ext, "application/octet-stream")
                 self.upload_to_firebase(
-                    recorded_audio_path_local, 
-                    f"{base_path}/recorded/{voice_id}_recorded{rec_ext}",
+                    recorded_audio_path_local,
+                    f"{base_path}/recorded/{recorded_filename}",
                     content_type=rec_ct,
                     metadata={**common_meta, "file_kind": "recorded"}
                 )
-                recorded_path_for_response = f"{voice_id}_recorded{rec_ext}"
+                recorded_path_for_response = recorded_filename
             
-            # Upload voice profile to correct bucket path
+            # Upload voice profile to standardized bucket path
             self.upload_to_firebase(
-                profile_path, 
-                f"{base_path}/profiles/{voice_id}.npy",
+                profile_local_path,
+                f"{base_path}/profiles/{profile_filename}",
                 content_type="application/octet-stream",
                 metadata={**common_meta, "file_kind": "profile"}
             )
@@ -1219,18 +1227,18 @@ class ChatterboxVC:
             result = {
                 "status": "success",
                 "voice_id": voice_id,
-                "profile_path": f"{voice_id}.npy",
+                "profile_path": profile_filename,
                 "recorded_audio_path": recorded_path_for_response,
-                "sample_audio_path": f"voice_{voice_id}_sample.mp3",      # Sample stays MP3 for size
+                "sample_audio_path": sample_filename,
                 "generation_time": generation_time,
                 "metadata": metadata or {},
                 "language": language
             }
             
             logger.info(f"✅ Voice clone created successfully!")
-            logger.info(f"  - Profile path: {profile_path}")
-            logger.info(f"  - Recorded audio path: {recorded_path_for_response}")
-            logger.info(f"  - Sample audio path: {sample_audio_path}")
+            logger.info(f"  - Profile (storage): {profile_filename}")
+            logger.info(f"  - Recorded (storage): {recorded_path_for_response}")
+            logger.info(f"  - Sample (storage): {sample_filename}")
             logger.info(f"  - Generation time: {generation_time:.2f}s")
 
             # Also write/update Firestore voice_profiles document so the main app's /voices list updates in realtime
@@ -1247,10 +1255,10 @@ class ChatterboxVC:
                         "language": language,
                         "isKidsVoice": is_kids_voice,
                         "status": "ready",
-                        "samplePath": f"{base_path}/samples/voice_{voice_id}_sample.mp3",
-                        "profilePath": f"{base_path}/profiles/{voice_id}.npy",
+                        "samplePath": f"{base_path}/samples/{sample_filename}",
+                        "profilePath": f"{base_path}/profiles/{profile_filename}",
                         "recordedPath": (
-                            recorded_pointer if recorded_pointer else f"{base_path}/recorded/{voice_id}_recorded{rec_ext}"
+                            recorded_pointer if recorded_pointer else f"{base_path}/recorded/{recorded_filename}"
                         ),
                         "createdAt": SERVER_TIMESTAMP,
                         "updatedAt": SERVER_TIMESTAMP,
@@ -1265,7 +1273,7 @@ class ChatterboxVC:
             
             # Clean up local files after Firebase upload (keep serverless environment clean)
             try:
-                local_cleanup = [profile_path, sample_audio_path]
+                local_cleanup = [profile_local_path, sample_local_path]
                 if recorded_audio_path_local:
                     local_cleanup.append(recorded_audio_path_local)
                 for file_path in local_cleanup:
