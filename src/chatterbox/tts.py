@@ -358,7 +358,7 @@ class AdaptiveParameterManager:
     CONTENT_PROFILES = {
         ContentType.DIALOGUE: {
             "temperature": 0.7,         # Lower for more consistent speech patterns
-            "exaggeration": 0.7,        # Higher for emotional expression
+            "exaggeration": 0.8,        # Higher for emotional expression
             "cfg_weight": 0.6,          # Higher for clarity in speech
             "repetition_penalty": 1.3,  # Higher to avoid repetitive dialogue
             "min_p": 0.05,
@@ -366,7 +366,7 @@ class AdaptiveParameterManager:
         },
         ContentType.NARRATIVE: {
             "temperature": 0.8,         # Balanced for natural storytelling
-            "exaggeration": 0.5,        # Neutral for story flow
+            "exaggeration": 0.65,        # Neutral for story flow
             "cfg_weight": 0.5,          # Balanced
             "repetition_penalty": 1.2,  # Standard
             "min_p": 0.05,
@@ -374,7 +374,7 @@ class AdaptiveParameterManager:
         },
         ContentType.DESCRIPTIVE: {
             "temperature": 0.9,         # Higher for natural variation in descriptions
-            "exaggeration": 0.3,        # Lower for calm, descriptive delivery
+            "exaggeration": 0.55,        # Lower for calm, descriptive delivery
             "cfg_weight": 0.4,          # Lower for more creative interpretation
             "repetition_penalty": 1.1,  # Lower - descriptions can have repetitive structure
             "min_p": 0.04,              # Slightly lower for more variety
@@ -382,7 +382,7 @@ class AdaptiveParameterManager:
         },
         ContentType.TRANSITION: {
             "temperature": 0.75,        # Moderate for smooth transitions
-            "exaggeration": 0.4,        # Lower for transitional calm
+            "exaggeration": 0.5,        # Lower for transitional calm
             "cfg_weight": 0.55,         # Slightly higher for clarity
             "repetition_penalty": 1.25, # Moderate
             "min_p": 0.05,
@@ -405,6 +405,12 @@ class AdaptiveParameterManager:
                 "low_complexity": -0.05     # Lower CFG for simple text creativity
             }
         }
+        # Intro boost to make the first sentence more engaging
+        self.enable_intro_boost = True
+        self.intro_exaggeration_boost = 0.2   # +0.2 on first chunk
+        self.intro_temperature_boost = 0.05   # +0.05 on first chunk
+        self.intro_cfg_weight_factor = 0.9    # reduce CFG a bit for more expression
+        self.intro_boost_max_words = 35       # apply full boost only if first chunk is short
     
     def get_adaptive_parameters(self, chunk_info: ChunkInfo) -> Dict:
         """Get optimized parameters for a specific chunk"""
@@ -424,8 +430,16 @@ class AdaptiveParameterManager:
         
         # Apply positional adjustments
         if chunk_info.is_first_chunk:
-            params["temperature"] *= 0.95      # Slightly more stable start
-            params["cfg_weight"] *= 1.05       # Slightly higher clarity for beginning
+            # Original behavior favored stability; instead, apply a gentle intro boost for engagement.
+            # For long first chunks, avoid raising temperature to prevent over-energizing long passages.
+            if self.enable_intro_boost:
+                if chunk_info.word_count <= self.intro_boost_max_words:
+                    params["temperature"] = max(0.5, min(1.2, params.get("temperature", 0.8) + self.intro_temperature_boost))
+                    params["exaggeration"] = max(0.1, min(1.0, params.get("exaggeration", 0.5) + self.intro_exaggeration_boost))
+                    params["cfg_weight"] = max(0.2, min(0.8, params.get("cfg_weight", 0.5) * self.intro_cfg_weight_factor))
+                else:
+                    # Long first chunk: keep temperature unchanged, only a light expressiveness bump
+                    params["exaggeration"] = max(0.1, min(1.0, params.get("exaggeration", 0.5) + min(0.1, self.intro_exaggeration_boost * 0.5)))
         
         if chunk_info.is_last_chunk:
             params["exaggeration"] *= 0.9      # Slightly calmer ending
@@ -1003,6 +1017,11 @@ class AdvancedStitcher:
 
         # Final loudness normalization (EBU R128) configuration (default OFF to avoid impacting voice color)
         self.enable_loudness_normalization = False
+        # Gentle fade-in for the very first chunk to avoid abrupt start (ms)
+        self.fade_in_first_chunk_ms = 25
+
+        # Add an extra pause after the first chunk to let the opener land (ms)
+        self.extra_first_pause_ms = 50
         self.loudness_target_lufs = -19.4   # Integrated loudness target (LUFS)
         self.loudness_target_tp = -1.0      # True peak target (dBTP)
         self.loudness_target_lra = 11.0     # Target Loudness Range (LU)
@@ -1039,6 +1058,10 @@ class AdvancedStitcher:
         # Apply global pace factor
         pause_duration *= max(0.5, min(2.0, self.global_pause_factor))
 
+        # Add a bit more air after the very first chunk
+        if chunk_info.is_first_chunk:
+            pause_duration += max(0, int(self.extra_first_pause_ms))
+
         # Ensure reasonable bounds
         pause_duration = max(100, min(1200, pause_duration))
         
@@ -1051,8 +1074,12 @@ class AdvancedStitcher:
         
         processed_segment = segment
         
-        # Apply fade in (except for first chunk)
-        if not is_first:
+        # Apply fade in
+        if is_first:
+            fade_in_duration = max(0, int(self.fade_in_first_chunk_ms))
+            if fade_in_duration > 0:
+                processed_segment = processed_segment.fade_in(fade_in_duration)
+        else:
             fade_in_duration = self.fade_in_duration
             
             # Longer fade for content type transitions
@@ -1756,9 +1783,31 @@ class ChatterboxTTS:
         if len(sanitized_text) != len(text):
             logger.info(f"🧹 Text sanitization: {len(text)} → {len(sanitized_text)} characters")
         
-        # Step 2: Smart chunking with content analysis
+        # Step 2: Smart chunking with optional lead-sentence split
         target_chars = int(max_chars * 0.8)  # Target 80% of max for better quality
-        chunk_infos = self.smart_chunker.smart_chunk(sanitized_text, target_chars, max_chars)
+
+        # Heuristic: make the very first chunk end at the first '.' if it appears early
+        # to create a punchy opener. If not found soon, fall back to normal chunking.
+        first_dot_idx = sanitized_text.find('.')
+        chunk_infos: List[ChunkInfo]
+        if 0 <= first_dot_idx <= 200:  # bound to avoid overly long first sentence
+            lead = sanitized_text[: first_dot_idx + 1].strip()
+            rest = sanitized_text[first_dot_idx + 1 :].lstrip()
+            lead_chunk = self.smart_chunker._create_chunk_info(0, lead, True, False)
+            rest_chunks = self.smart_chunker.smart_chunk(rest, target_chars, max_chars)
+            # Re-index rest chunks and flags
+            for i, ch in enumerate(rest_chunks):
+                ch.id = i + 1
+                if i == len(rest_chunks) - 1:
+                    ch.is_last_chunk = True
+            # First chunk cannot know if there's a paragraph break; keep default False
+            if rest_chunks:
+                lead_chunk.is_last_chunk = False
+            else:
+                lead_chunk.is_last_chunk = True
+            chunk_infos = [lead_chunk] + rest_chunks
+        else:
+            chunk_infos = self.smart_chunker.smart_chunk(sanitized_text, target_chars, max_chars)
         
         # Log detailed chunk analysis
         if chunk_infos:
