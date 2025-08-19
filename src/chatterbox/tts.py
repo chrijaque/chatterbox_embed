@@ -358,7 +358,7 @@ class AdaptiveParameterManager:
     CONTENT_PROFILES = {
         ContentType.DIALOGUE: {
             "temperature": 0.7,         # Lower for more consistent speech patterns
-            "exaggeration": 0.8,        # Higher for emotional expression
+            "exaggeration": 0.75,        # Higher for emotional expression
             "cfg_weight": 0.6,          # Higher for clarity in speech
             "repetition_penalty": 1.3,  # Higher to avoid repetitive dialogue
             "min_p": 0.05,
