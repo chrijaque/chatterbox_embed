@@ -1008,10 +1008,11 @@ class ChatterboxVC:
         import time
         start_time = time.time()
         
-        # Generate voice_id if not provided, using user_id in the name
+        # Use provided voice_id; do not invent new IDs unless absolutely necessary
         if voice_id is None:
             if voice_name is None:
-                raise ValueError("Either voice_id or voice_name must be provided")
+                raise ValueError("voice_id is required (provided by server).")
+            # Last-resort fallback (legacy): derive from name
             user_id_for_naming = str((metadata or {}).get("user_id", ""))
             voice_id = build_voice_id_with_user(voice_name, user_id_for_naming)
         
@@ -1032,12 +1033,13 @@ class ChatterboxVC:
                 processed_audio_path = audio_file_path
                 logger.info(f"  - Step 0: Skipping audio cleaning (using original reference)")
             
-            # Derive standardized filenames using safe voice name and user id
+            # Enforce deterministic filenames from voice_id
             user_id_meta = str((metadata or {}).get("user_id", ""))
+            profile_filename = (metadata or {}).get("profile_filename") or f"{voice_id}.npy"
+            sample_filename = (metadata or {}).get("sample_filename") or f"{voice_id}.mp3"
+            # recorded filename is only used when no pointer was provided
             safe_name = make_safe_slug(voice_name or "voice")
             safe_user = make_safe_slug(user_id_meta or "user")
-            profile_filename = (metadata or {}).get("profile_filename") or f"voice_{safe_name}_{safe_user}.npy"
-            sample_filename = (metadata or {}).get("sample_filename") or f"sample_{safe_name}_{safe_user}.mp3"
             recorded_filename = (metadata or {}).get("recorded_filename") or f"recording_{safe_name}_{safe_user}.wav"
 
             # Step 1: Save voice profile from (cleaned) audio (local temp), will upload with standardized name
@@ -1130,10 +1132,10 @@ class ChatterboxVC:
                 base_path = f"audio/voices/{language}"
                 logger.info(f"    - Using regular folder: {base_path}")
             
-            # Firebase Storage Structure (standardized):
-            # /{base_path}/profiles/voice_{safe_name}_{user_id}.npy
-            # /{base_path}/recorded/recording_{safe_name}_{user_id}.wav
-            # /{base_path}/samples/sample_{safe_name}_{user_id}.mp3
+            # Firebase Storage Structure (standardized by voiceId):
+            # /{base_path}/profiles/{voiceId}.npy
+            # /{base_path}/samples/{voiceId}.mp3
+            # recorded path remains client-provided or recording_{safeName}_{userId}.ext
             
             # Pre-create Firestore doc to surface entry immediately while uploads run
             try:
@@ -1283,6 +1285,47 @@ class ChatterboxVC:
             except Exception as e:
                 logger.warning(f"  - Failed to clean up some local files: {e}")
             
+            # Attempt app callback on success if provided
+            try:
+                cb_url = (metadata or {}).get('callback_url')
+                if cb_url:
+                    import hmac, hashlib, time, json
+                    from urllib.parse import urlparse
+                    from urllib.request import Request, urlopen
+                    # Build canonical storage paths
+                    kids_segment = 'kids/' if is_kids_voice else ''
+                    profile_path = f"audio/voices/{language}/{kids_segment}profiles/{voice_id}.npy"
+                    sample_path = f"audio/voices/{language}/{kids_segment}samples/{voice_id}.mp3"
+                    payload = {
+                        'status': 'success',
+                        'user_id': user_id_meta,
+                        'voice_id': voice_id,
+                        'voice_name': voice_name or '',
+                        'language': language,
+                        'profile_path': profile_path,
+                        'sample_path': sample_path,
+                    }
+                    secret = os.getenv('DAEZEND_API_SHARED_SECRET')
+                    if secret:
+                        parsed = urlparse(cb_url)
+                        path = parsed.path or '/api/voice-clone/callback'
+                        ts = str(int(time.time() * 1000))
+                        body = json.dumps(payload).encode('utf-8')
+                        prefix = f"POST\n{path}\n{ts}\n".encode('utf-8')
+                        sig = hmac.new(secret.encode('utf-8'), prefix + body, hashlib.sha256).hexdigest()
+                        req = Request(cb_url, data=body, headers={
+                            'Content-Type': 'application/json',
+                            'X-Daezend-Timestamp': ts,
+                            'X-Daezend-Signature': sig,
+                        }, method='POST')
+                        try:
+                            with urlopen(req, timeout=15) as resp:
+                                _ = resp.read()
+                        except Exception as _cb_e:
+                            logger.warning(f"⚠️ Success callback failed: {_cb_e}")
+            except Exception:
+                pass
+
             return result
             
         except Exception as e:
@@ -1291,6 +1334,41 @@ class ChatterboxVC:
             logger.error(f"  - Exception type: {type(e).__name__}")
             import traceback
             logger.error(f"  - Full traceback: {traceback.format_exc()}")
+            # Attempt error callback
+            try:
+                cb_url = (metadata or {}).get('callback_url')
+                if cb_url:
+                    import hmac, hashlib, time, json
+                    from urllib.parse import urlparse
+                    from urllib.request import Request, urlopen
+                    payload = {
+                        'status': 'error',
+                        'user_id': (metadata or {}).get('user_id', ''),
+                        'voice_id': voice_id or '',
+                        'voice_name': voice_name or '',
+                        'language': (metadata or {}).get('language', 'en'),
+                        'error': str(e),
+                    }
+                    secret = os.getenv('DAEZEND_API_SHARED_SECRET')
+                    if secret:
+                        parsed = urlparse(cb_url)
+                        path = parsed.path or '/api/voice-clone/callback'
+                        ts = str(int(time.time() * 1000))
+                        body = json.dumps(payload).encode('utf-8')
+                        prefix = f"POST\n{path}\n{ts}\n".encode('utf-8')
+                        sig = hmac.new(secret.encode('utf-8'), prefix + body, hashlib.sha256).hexdigest()
+                        req = Request(cb_url, data=body, headers={
+                            'Content-Type': 'application/json',
+                            'X-Daezend-Timestamp': ts,
+                            'X-Daezend-Signature': sig,
+                        }, method='POST')
+                        try:
+                            with urlopen(req, timeout=15) as resp:
+                                _ = resp.read()
+                        except Exception as _cb_e:
+                            logger.warning(f"⚠️ Error callback failed: {_cb_e}")
+            except Exception:
+                pass
             
             return {
                 "status": "error",
