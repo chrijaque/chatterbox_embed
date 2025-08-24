@@ -1064,7 +1064,8 @@ class ChatterboxVC:
                 raise ValueError("metadata.sample_filename is required")
             # recorded upload is not required; recorded_path may be a pointer to existing file
             # Use filenames exactly as provided by the API with no modifications
-            logger.info(f"    - Using API filenames as-is → profile: {profile_filename}, sample: {sample_filename}, recorded: {recorded_filename}")
+            recorded_path = metadata.get("recorded_path", "N/A")
+            logger.info(f"    - Using API filenames as-is → profile: {profile_filename}, sample: {sample_filename}, recorded: {recorded_path}")
             
             user_id_meta = str(metadata.get("user_id", ""))
 
