@@ -194,7 +194,9 @@ class S3Token2Mel(torch.nn.Module):
                 "Reference mel length is not equal to 2 * reference token length.\n"
             )
             ref_speech_tokens = ref_speech_tokens[:, :ref_mels_24.shape[1] // 2]
-            ref_speech_token_lens = ref_speech_token_lens.clone()
+            # Ensure tensor is not in inference mode before in-place modification
+            # Use detach() to get a regular tensor that can be modified in-place
+            ref_speech_token_lens = ref_speech_token_lens.clone().detach()
             ref_speech_token_lens[0] = ref_speech_tokens.shape[1]
 
         return dict(

@@ -1635,6 +1635,8 @@ class ChatterboxTTS:
         # Make sure mel_len = 2 * stoken_len
         if ref_mels_24.shape[1] != 2 * ref_speech_tokens.shape[1]:
             ref_speech_tokens = ref_speech_tokens[:, :ref_mels_24.shape[1] // 2]
+            # Ensure tensor is not in inference mode before in-place modification
+            ref_speech_token_lens = ref_speech_token_lens.clone().detach()
             ref_speech_token_lens[0] = ref_speech_tokens.shape[1]
         
         # Create s3gen ref_dict with saved embedding
