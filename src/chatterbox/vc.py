@@ -1008,13 +1008,9 @@ class ChatterboxVC:
         import time
         start_time = time.time()
         
-        # Use provided voice_id; do not invent new IDs unless absolutely necessary
+        # Strict: require server-provided voice_id; do not invent
         if voice_id is None:
-            if voice_name is None:
-                raise ValueError("voice_id is required (provided by server).")
-            # Last-resort fallback (legacy): derive from name
-            user_id_for_naming = str((metadata or {}).get("user_id", ""))
-            voice_id = build_voice_id_with_user(voice_name, user_id_for_naming)
+            raise ValueError("voice_id is required and must be provided by the server")
         
         logger.info(f"🎤 ChatterboxVC.create_voice_clone called")
         logger.info(f"  - audio_file_path: {audio_file_path}")
@@ -1076,7 +1072,7 @@ class ChatterboxVC:
             # Step 4: Convert sample to MP3 and save (local temp)
             logger.info(f"  - Step 4: Converting sample to MP3...")
             sample_mp3_bytes = self.tensor_to_mp3_bytes(sample_audio, self.sr, "96k")
-            sample_local_path = f"{voice_id}_sample.mp3"
+            sample_local_path = f"{voice_id}.mp3"
             
             # Save sample to file
             with open(sample_local_path, 'wb') as f:
