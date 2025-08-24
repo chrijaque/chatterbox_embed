@@ -977,6 +977,13 @@ class ChatterboxVC:
             
             # Upload directly from file path (more memory efficient)
             blob.upload_from_filename(file_path, content_type=content_type)
+
+            # Persist metadata explicitly to ensure it sticks
+            if metadata:
+                try:
+                    blob.patch()
+                except Exception as _patch_e:
+                    logger.warning(f"⚠️ Could not patch metadata for {destination_blob_name}: {_patch_e}")
             
             # Make the blob publicly accessible
             blob.make_public()
@@ -1159,11 +1166,22 @@ class ChatterboxVC:
             except Exception as e:
                 logger.warning(f"⚠️ Failed to pre-create Firestore voice_profiles doc: {e}")
 
-            # Use exact storage metadata from API
-            storage_metadata = metadata.get("storage_metadata", {})
-            
+            # Use exact storage metadata from API; accept multiple shapes for backward compatibility
+            storage_metadata = (metadata or {}).get("storage_metadata") or (metadata or {}).get("metadata") or {}
+            # If still empty, synthesize from known fields (last-resort fallback)
             if not storage_metadata:
-                raise ValueError("storage_metadata is required but not provided")
+                storage_metadata = {
+                    "user_id": str(metadata.get("user_id", "")),
+                    "voice_id": str(voice_id or ""),
+                    "voice_name": str(voice_name or ""),
+                    "language": str((metadata or {}).get("language", "en")),
+                    "is_kids_voice": str(bool((metadata or {}).get("is_kids_voice", False))).lower(),
+                }
+            else:
+                # Normalize values to strings for Storage metadata
+                storage_metadata = {
+                    k: (str(v).lower() if k == "is_kids_voice" else str(v)) for k, v in storage_metadata.items()
+                }
 
             # Upload sample audio to exact path with exact metadata
             sample_storage_path = f"audio/voices/{language}/samples/{sample_filename}"
