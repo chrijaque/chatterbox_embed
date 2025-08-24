@@ -997,10 +997,13 @@ class ChatterboxVC:
         
         Args:
             audio_file_path: Path to the audio file
-            voice_id: Unique voice identifier (optional, will generate if not provided)
-            voice_name: Voice name (required if voice_id not provided)
-            metadata: Optional metadata
-            sample_text: Custom text for sample generation (optional, uses original audio if not provided)
+            voice_id: Unique voice identifier (required)
+            voice_name: Voice name (optional)
+            metadata: Optional metadata containing explicit filenames:
+                - profile_filename: Required filename for voice profile (.npy)
+                - sample_filename: Required filename for sample audio (.mp3)
+                - recorded_filename: Required filename for recorded audio (.wav)
+            sample_text: Custom text for sample generation (optional, uses default if not provided)
             
         Returns:
             Dict with status, voice_id, profile_path, recorded_audio_path, sample_audio_path, generation_time
@@ -1029,18 +1032,26 @@ class ChatterboxVC:
                 processed_audio_path = audio_file_path
                 logger.info(f"  - Step 0: Skipping audio cleaning (using original reference)")
             
-            # Enforce deterministic filenames from voice_id
-            user_id_meta = str((metadata or {}).get("user_id", ""))
-            profile_filename = (metadata or {}).get("profile_filename") or f"{voice_id}.npy"
-            sample_filename = (metadata or {}).get("sample_filename") or f"{voice_id}.mp3"
-            # recorded filename is only used when no pointer was provided
-            safe_name = make_safe_slug(voice_name or "voice")
-            safe_user = make_safe_slug(user_id_meta or "user")
-            recorded_filename = (metadata or {}).get("recorded_filename") or f"recording_{safe_name}_{safe_user}.wav"
+            # Require explicit filenames from metadata
+            if not metadata:
+                raise ValueError("metadata is required and must contain explicit filenames")
+            
+            profile_filename = metadata.get("profile_filename")
+            sample_filename = metadata.get("sample_filename")
+            recorded_filename = metadata.get("recorded_filename")
+            
+            if not profile_filename:
+                raise ValueError("metadata.profile_filename is required")
+            if not sample_filename:
+                raise ValueError("metadata.sample_filename is required")
+            if not recorded_filename:
+                raise ValueError("metadata.recorded_filename is required")
+            
+            user_id_meta = str(metadata.get("user_id", ""))
 
-            # Step 1: Save voice profile from (cleaned) audio (local temp), will upload with standardized name
+            # Step 1: Save voice profile from (cleaned) audio (local temp)
             logger.info(f"  - Step 1: Saving voice profile...")
-            profile_local_path = f"{voice_id}.npy"
+            profile_local_path = profile_filename
             self.save_voice_profile(processed_audio_path, profile_local_path)
             logger.info(f"    - Voice profile saved: {profile_local_path}")
             
@@ -1072,7 +1083,7 @@ class ChatterboxVC:
             # Step 4: Convert sample to MP3 and save (local temp)
             logger.info(f"  - Step 4: Converting sample to MP3...")
             sample_mp3_bytes = self.tensor_to_mp3_bytes(sample_audio, self.sr, "96k")
-            sample_local_path = f"{voice_id}.mp3"
+            sample_local_path = sample_filename
             
             # Save sample to file
             with open(sample_local_path, 'wb') as f:
@@ -1154,24 +1165,20 @@ class ChatterboxVC:
             except Exception as e:
                 logger.warning(f"⚠️ Failed to pre-create Firestore voice_profiles doc: {e}")
 
-            # Common metadata for all files
-            user_id_meta = str((metadata or {}).get("user_id", ""))
-            logger.info(f"  - metadata.user_id for Storage: '{user_id_meta}'")
-            common_meta = {
-                "user_id": user_id_meta,
-                "voice_id": voice_id,
-                "voice_name": voice_name or "",
-                "language": language,
-                "is_kids_voice": str(is_kids_voice).lower(),
-                "model_type": (metadata or {}).get("model_type", "chatterbox"),
-            }
+            # Use exact storage metadata from API
+            storage_metadata = metadata.get("storage_metadata", {})
+            logger.info(f"  - Using storage metadata: {storage_metadata}")
 
-            # Upload sample audio to standardized bucket path
+            # Upload sample audio to exact path with exact metadata
+            sample_storage_path = f"audio/voices/{language}/samples/{sample_filename}"
+            if is_kids_voice:
+                sample_storage_path = f"audio/voices/{language}/kids/samples/{sample_filename}"
+            
             self.upload_to_firebase(
                 sample_local_path,
-                f"{base_path}/samples/{sample_filename}",
+                sample_storage_path,
                 content_type="audio/mpeg",
-                metadata={**common_meta, "file_kind": "sample"}
+                metadata=storage_metadata
             )
             
             # Upload recorded audio only if we didn't receive a pointer
@@ -1209,16 +1216,20 @@ class ChatterboxVC:
                     recorded_audio_path_local,
                     f"{base_path}/recorded/{recorded_filename}",
                     content_type=rec_ct,
-                    metadata={**common_meta, "file_kind": "recorded"}
+                    metadata=storage_metadata
                 )
                 recorded_path_for_response = recorded_filename
             
-            # Upload voice profile to standardized bucket path
+            # Upload voice profile to exact path with exact metadata
+            profile_storage_path = f"audio/voices/{language}/profiles/{profile_filename}"
+            if is_kids_voice:
+                profile_storage_path = f"audio/voices/{language}/kids/profiles/{profile_filename}"
+            
             self.upload_to_firebase(
                 profile_local_path,
-                f"{base_path}/profiles/{profile_filename}",
+                profile_storage_path,
                 content_type="application/octet-stream",
-                metadata={**common_meta, "file_kind": "profile"}
+                metadata=storage_metadata
             )
             
             # Return JSON-serializable response
@@ -1283,7 +1294,7 @@ class ChatterboxVC:
             
             # Attempt app callback on success if provided
             try:
-                cb_url = (metadata or {}).get('callback_url')
+                cb_url = metadata.get('callback_url')
                 if cb_url:
                     import hmac, hashlib, time, json
                     from urllib.parse import urlparse
@@ -1294,9 +1305,9 @@ class ChatterboxVC:
                     sample_path = f"audio/voices/{language}/{kids_segment}samples/{voice_id}.mp3"
                     payload = {
                         'status': 'success',
-                        'user_id': user_id_meta,
+                        'user_id': storage_metadata.get('user_id', ''),
                         'voice_id': voice_id,
-                        'voice_name': voice_name or '',
+                        'voice_name': storage_metadata.get('voice_name', ''),
                         'language': language,
                         'profile_path': profile_path,
                         'sample_path': sample_path,
@@ -1332,17 +1343,17 @@ class ChatterboxVC:
             logger.error(f"  - Full traceback: {traceback.format_exc()}")
             # Attempt error callback
             try:
-                cb_url = (metadata or {}).get('callback_url')
+                cb_url = metadata.get('callback_url')
                 if cb_url:
                     import hmac, hashlib, time, json
                     from urllib.parse import urlparse
                     from urllib.request import Request, urlopen
                     payload = {
                         'status': 'error',
-                        'user_id': (metadata or {}).get('user_id', ''),
+                        'user_id': storage_metadata.get('user_id', ''),
                         'voice_id': voice_id or '',
-                        'voice_name': voice_name or '',
-                        'language': (metadata or {}).get('language', 'en'),
+                        'voice_name': storage_metadata.get('voice_name', ''),
+                        'language': language,
                         'error': str(e),
                     }
                     secret = os.getenv('DAEZEND_API_SHARED_SECRET')
@@ -1443,16 +1454,22 @@ def _init_firestore_client():
 
 def clone_voice(
     *,
+    user_id: str,
     name: str,
+    language: str,
+    is_kids_voice: bool,
+    model_type: str,
+    voice_id: str,
+    audio_path: str,
+    profile_filename: str,
+    sample_filename: str,
+    output_basename: str,
+    storage_metadata: Dict,
+    callback_url: str,
     audio_bytes: bytes,
     audio_format: str = "wav",
-    language: str = "en",
-    is_kids_voice: bool = False,
-    model_type: str = "chatterbox",
-    user_id: str = "",
-    profile_id: Optional[str] = None,
 ) -> Dict:
-    """Module-level helper used by Redis worker to clone a voice and update Firestore.
+    """Module-level helper used by Redis worker to clone a voice according to exact API specification.
 
     Returns a dict mirroring create_voice_clone plus Firestore update result.
     """
@@ -1465,15 +1482,25 @@ def clone_voice(
         tmp.flush()
         tmp.close()
 
-        # Load models and run clone
+        # Load models and run clone with exact API parameters
         device = "cpu"
         vc = ChatterboxVC.from_pretrained(device)
-        result = vc.create_voice_clone(audio_file_path=tmp.name, voice_name=name, metadata={
-            "language": language,
-            "is_kids_voice": is_kids_voice,
-            "model_type": model_type,
-            "user_id": user_id,
-        })
+        result = vc.create_voice_clone(
+            audio_file_path=tmp.name, 
+            voice_id=voice_id,
+            voice_name=name, 
+            metadata={
+                "language": language,
+                "is_kids_voice": is_kids_voice,
+                "model_type": model_type,
+                "user_id": user_id,
+                "profile_filename": profile_filename,
+                "sample_filename": sample_filename,
+                "recorded_filename": audio_path,  # Use the provided audio_path
+                "storage_metadata": storage_metadata,
+                "callback_url": callback_url,
+            }
+        )
 
         # Clean up temp file
         try:
@@ -1484,28 +1511,23 @@ def clone_voice(
         # Write Firestore voice_profiles/{docId}
         client = _init_firestore_client()
         if client and result.get("status") == "success":
-            doc_id = profile_id or result.get("voice_id") or name
+            doc_id = voice_id
             doc_ref = client.collection("voice_profiles").document(doc_id)
             from google.cloud.firestore import SERVER_TIMESTAMP  # type: ignore
-            base_path = f"audio/voices/{language}{'/kids' if is_kids_voice else ''}"
-            # Match recorded file extension returned by create_voice_clone
-            rec_ext = _os.path.splitext(result.get('recorded_audio_path', ''))[1] or '.wav'
             doc_ref.set({
                 "userId": user_id,
                 "name": name,
                 "language": language,
                 "isKidsVoice": is_kids_voice,
                 "status": "ready",
-                "samplePath": f"{base_path}/samples/{result.get('voice_id')}.mp3",
-                "profilePath": f"{base_path}/profiles/{result.get('voice_id')}.npy",
-                "recordedPath": f"{base_path}/recorded/recording_{make_safe_slug(name)}_{make_safe_slug(user_id)}{rec_ext}",
+                "samplePath": f"audio/voices/{language}{'/kids' if is_kids_voice else ''}/samples/{sample_filename}",
+                "profilePath": f"audio/voices/{language}{'/kids' if is_kids_voice else ''}/profiles/{profile_filename}",
+                "recordedPath": audio_path,
                 "createdAt": SERVER_TIMESTAMP,
                 "updatedAt": SERVER_TIMESTAMP,
                 "metadata": result.get("metadata", {}),
             }, merge=True)
-            result["firestore_profile_id"] = doc_id
-
-        return result
+            return result
     except Exception as e:
         logger.exception("clone_voice failed")
         return {"status": "error", "error": str(e)}

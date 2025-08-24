@@ -316,7 +316,22 @@ if hasattr(tts_model, "t3"):
 result = vc_model.create_voice_clone(
     audio_file_path="reference_audio.wav",
     voice_id="my_voice",
-    output_dir="./voice_clones"
+    metadata={
+        "language": "en",
+        "is_kids_voice": False,
+        "profile_filename": "my_voice.npy",
+        "sample_filename": "my_voice.mp3",
+        "recorded_filename": "recording_my_voice.wav",
+        "storage_metadata": {
+            "user_id": "user_123",
+            "voice_id": "my_voice",
+            "voice_name": "My Voice",
+            "language": "en",
+            "is_kids_voice": "false",
+            "model_type": "chatterbox",
+            "file_kind": "profile"
+        }
+    }
 )
 
 if result["status"] == "success":
@@ -357,7 +372,22 @@ audio_tensor, mp3_bytes = vc_model.generate_voice_sample(
 result = vc_model.create_voice_clone(
     audio_file_path="reference_audio.wav",
     voice_id="unique_voice_id",
-    output_dir="./outputs"
+    metadata={
+        "language": "en",
+        "is_kids_voice": False,
+        "profile_filename": "unique_voice_id.npy",
+        "sample_filename": "unique_voice_id.mp3",
+        "recorded_filename": "recording_unique_voice_id.wav",
+        "storage_metadata": {
+            "user_id": "user_123",
+            "voice_id": "unique_voice_id",
+            "voice_name": "Unique Voice",
+            "language": "en",
+            "is_kids_voice": "false",
+            "model_type": "chatterbox",
+            "file_kind": "profile"
+        }
+    }
 )
 
 # Access all generated data
@@ -400,10 +430,15 @@ torchaudio.save("converted.wav", converted_audio, vc_model.sr)
 | Parameter | Description |
 |-----------|-------------|
 | `audio_file_path` | Path to reference audio file |
-| `voice_id` | Unique identifier for the voice |
-| `output_dir` | Directory to save outputs |
-| `bitrate` | MP3 bitrate for audio conversion |
-| `text` | Custom text for voice samples |
+| `voice_id` | Unique identifier for the voice (required) |
+| `metadata` | Dictionary containing required parameters:
+| `metadata.language` | Language code (e.g., "en") |
+| `metadata.is_kids_voice` | Boolean for kids voice variant |
+| `metadata.profile_filename` | Required filename for voice profile (.npy) |
+| `metadata.sample_filename` | Required filename for sample audio (.mp3) |
+| `metadata.recorded_filename` | Required filename for recorded audio (.wav) |
+| `metadata.storage_metadata` | Exact metadata for Firebase Storage uploads |
+| `sample_text` | Custom text for voice samples (optional) |
 
 ### Benefits of Voice Cloning
 

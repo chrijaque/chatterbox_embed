@@ -88,7 +88,22 @@ def test_voice_clone():
             audio_file_path=test_audio_path,
             voice_id="quick_test_voice",
             voice_name="Quick Test Voice",
-            metadata={"language": "en", "is_kids_voice": False}
+            metadata={
+                "language": "en", 
+                "is_kids_voice": False,
+                "profile_filename": "quick_test_voice.npy",
+                "sample_filename": "quick_test_voice.mp3",
+                "recorded_filename": "recording_quick_test_voice.wav",
+                "storage_metadata": {
+                    "user_id": "test_user",
+                    "voice_id": "quick_test_voice",
+                    "voice_name": "Quick Test Voice",
+                    "language": "en",
+                    "is_kids_voice": "false",
+                    "model_type": "chatterbox",
+                    "file_kind": "profile"
+                }
+            }
         )
         
         if result.get('status') == 'success':
