@@ -973,7 +973,13 @@ class ChatterboxVC:
             
             # Set metadata if provided
             if metadata:
+                logger.info(f"📋 SETTING FIREBASE METADATA:")
+                logger.info(f"  - Metadata type: {type(metadata)}")
+                logger.info(f"  - Metadata keys: {list(metadata.keys()) if metadata else 'None'}")
+                logger.info(f"  - Full metadata: {metadata}")
                 blob.metadata = metadata
+            else:
+                logger.warning(f"⚠️ No metadata provided to Firebase upload!")
             
             # Upload directly from file path (more memory efficient)
             blob.upload_from_filename(file_path, content_type=content_type)
@@ -1021,6 +1027,21 @@ class ChatterboxVC:
         logger.info(f"  - voice_name: {voice_name}")
         logger.info(f"  - metadata: {metadata}")
         logger.info(f"  - sample_text: {sample_text}")
+        
+        # Log detailed metadata breakdown
+        if metadata:
+            logger.info(f"🔍 CREATE_VOICE_CLONE METADATA BREAKDOWN:")
+            logger.info(f"  - language: {metadata.get('language')}")
+            logger.info(f"  - is_kids_voice: {metadata.get('is_kids_voice')}")
+            logger.info(f"  - model_type: {metadata.get('model_type')}")
+            logger.info(f"  - user_id: {metadata.get('user_id')}")
+            logger.info(f"  - profile_filename: {metadata.get('profile_filename')}")
+            logger.info(f"  - sample_filename: {metadata.get('sample_filename')}")
+            logger.info(f"  - recorded_filename: {metadata.get('recorded_filename')}")
+            logger.info(f"  - storage_metadata: {metadata.get('storage_metadata')}")
+            logger.info(f"  - callback_url: {metadata.get('callback_url')}")
+        else:
+            logger.warning(f"⚠️ No metadata provided!")
         
         try:
             # Step 0: Optional high-quality audio cleaning (disabled by default)
@@ -1167,12 +1188,26 @@ class ChatterboxVC:
 
             # Use exact storage metadata from API
             storage_metadata = metadata.get("storage_metadata", {})
-            logger.info(f"  - Using storage metadata: {storage_metadata}")
+            logger.info(f"🔍 STORAGE METADATA EXTRACTION:")
+            logger.info(f"  - Raw storage_metadata from API: {storage_metadata}")
+            logger.info(f"  - storage_metadata type: {type(storage_metadata)}")
+            logger.info(f"  - storage_metadata keys: {list(storage_metadata.keys()) if storage_metadata else 'None'}")
+            
+            if not storage_metadata:
+                logger.error(f"❌ CRITICAL: No storage_metadata found in API parameters!")
+                raise ValueError("storage_metadata is required but not provided")
 
             # Upload sample audio to exact path with exact metadata
             sample_storage_path = f"audio/voices/{language}/samples/{sample_filename}"
             if is_kids_voice:
                 sample_storage_path = f"audio/voices/{language}/kids/samples/{sample_filename}"
+            
+            logger.info(f"📤 UPLOADING SAMPLE AUDIO:")
+            logger.info(f"  - Local path: {sample_local_path}")
+            logger.info(f"  - Storage path: {sample_storage_path}")
+            logger.info(f"  - Filename: {sample_filename}")
+            logger.info(f"  - Content type: audio/mpeg")
+            logger.info(f"  - Metadata being used: {storage_metadata}")
             
             self.upload_to_firebase(
                 sample_local_path,
@@ -1212,6 +1247,13 @@ class ChatterboxVC:
                 # Proceed with upload as before
                 rec_ext = ".wav"
                 rec_ct = mime_map.get(rec_ext, "application/octet-stream")
+                logger.info(f"📤 UPLOADING RECORDED AUDIO:")
+                logger.info(f"  - Local path: {recorded_audio_path_local}")
+                logger.info(f"  - Storage path: {base_path}/recorded/{recorded_filename}")
+                logger.info(f"  - Filename: {recorded_filename}")
+                logger.info(f"  - Content type: {rec_ct}")
+                logger.info(f"  - Metadata being used: {storage_metadata}")
+                
                 self.upload_to_firebase(
                     recorded_audio_path_local,
                     f"{base_path}/recorded/{recorded_filename}",
@@ -1224,6 +1266,13 @@ class ChatterboxVC:
             profile_storage_path = f"audio/voices/{language}/profiles/{profile_filename}"
             if is_kids_voice:
                 profile_storage_path = f"audio/voices/{language}/kids/profiles/{profile_filename}"
+            
+            logger.info(f"📤 UPLOADING VOICE PROFILE:")
+            logger.info(f"  - Local path: {profile_local_path}")
+            logger.info(f"  - Storage path: {profile_storage_path}")
+            logger.info(f"  - Filename: {profile_filename}")
+            logger.info(f"  - Content type: application/octet-stream")
+            logger.info(f"  - Metadata being used: {storage_metadata}")
             
             self.upload_to_firebase(
                 profile_local_path,
@@ -1312,6 +1361,10 @@ class ChatterboxVC:
                         'profile_path': profile_path,
                         'sample_path': sample_path,
                     }
+                    
+                    logger.info(f"📞 SUCCESS CALLBACK PAYLOAD:")
+                    logger.info(f"  - Callback URL: {cb_url}")
+                    logger.info(f"  - Payload: {payload}")
                     secret = os.getenv('DAEZEND_API_SHARED_SECRET')
                     if secret:
                         parsed = urlparse(cb_url)
@@ -1356,6 +1409,10 @@ class ChatterboxVC:
                         'language': language,
                         'error': str(e),
                     }
+                    
+                    logger.info(f"📞 ERROR CALLBACK PAYLOAD:")
+                    logger.info(f"  - Callback URL: {cb_url}")
+                    logger.info(f"  - Payload: {payload}")
                     secret = os.getenv('DAEZEND_API_SHARED_SECRET')
                     if secret:
                         parsed = urlparse(cb_url)
@@ -1482,6 +1539,21 @@ def clone_voice(
         tmp.flush()
         tmp.close()
 
+        # Log all input parameters for debugging
+        logger.info(f"🔍 CLONE_VOICE INPUT PARAMETERS:")
+        logger.info(f"  - user_id: {user_id}")
+        logger.info(f"  - name: {name}")
+        logger.info(f"  - language: {language}")
+        logger.info(f"  - is_kids_voice: {is_kids_voice}")
+        logger.info(f"  - model_type: {model_type}")
+        logger.info(f"  - voice_id: {voice_id}")
+        logger.info(f"  - audio_path: {audio_path}")
+        logger.info(f"  - profile_filename: {profile_filename}")
+        logger.info(f"  - sample_filename: {sample_filename}")
+        logger.info(f"  - output_basename: {output_basename}")
+        logger.info(f"  - storage_metadata: {storage_metadata}")
+        logger.info(f"  - callback_url: {callback_url}")
+        
         # Load models and run clone with exact API parameters
         device = "cpu"
         vc = ChatterboxVC.from_pretrained(device)
@@ -1514,7 +1586,7 @@ def clone_voice(
             doc_id = voice_id
             doc_ref = client.collection("voice_profiles").document(doc_id)
             from google.cloud.firestore import SERVER_TIMESTAMP  # type: ignore
-            doc_ref.set({
+            firestore_doc = {
                 "userId": user_id,
                 "name": name,
                 "language": language,
@@ -1526,7 +1598,14 @@ def clone_voice(
                 "createdAt": SERVER_TIMESTAMP,
                 "updatedAt": SERVER_TIMESTAMP,
                 "metadata": result.get("metadata", {}),
-            }, merge=True)
+            }
+            
+            logger.info(f"🗄️ FIRESTORE DOCUMENT CREATION:")
+            logger.info(f"  - Document ID: {doc_id}")
+            logger.info(f"  - Collection: voice_profiles")
+            logger.info(f"  - Document data: {firestore_doc}")
+            
+            doc_ref.set(firestore_doc, merge=True)
             return result
     except Exception as e:
         logger.exception("clone_voice failed")
