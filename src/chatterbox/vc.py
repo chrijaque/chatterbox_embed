@@ -973,13 +973,7 @@ class ChatterboxVC:
             
             # Set metadata if provided
             if metadata:
-                logger.info(f"📋 SETTING FIREBASE METADATA:")
-                logger.info(f"  - Metadata type: {type(metadata)}")
-                logger.info(f"  - Metadata keys: {list(metadata.keys()) if metadata else 'None'}")
-                logger.info(f"  - Full metadata: {metadata}")
                 blob.metadata = metadata
-            else:
-                logger.warning(f"⚠️ No metadata provided to Firebase upload!")
             
             # Upload directly from file path (more memory efficient)
             blob.upload_from_filename(file_path, content_type=content_type)
@@ -1028,20 +1022,7 @@ class ChatterboxVC:
         logger.info(f"  - metadata: {metadata}")
         logger.info(f"  - sample_text: {sample_text}")
         
-        # Log detailed metadata breakdown
-        if metadata:
-            logger.info(f"🔍 CREATE_VOICE_CLONE METADATA BREAKDOWN:")
-            logger.info(f"  - language: {metadata.get('language')}")
-            logger.info(f"  - is_kids_voice: {metadata.get('is_kids_voice')}")
-            logger.info(f"  - model_type: {metadata.get('model_type')}")
-            logger.info(f"  - user_id: {metadata.get('user_id')}")
-            logger.info(f"  - profile_filename: {metadata.get('profile_filename')}")
-            logger.info(f"  - sample_filename: {metadata.get('sample_filename')}")
-            logger.info(f"  - recorded_filename: {metadata.get('recorded_filename')}")
-            logger.info(f"  - storage_metadata: {metadata.get('storage_metadata')}")
-            logger.info(f"  - callback_url: {metadata.get('callback_url')}")
-        else:
-            logger.warning(f"⚠️ No metadata provided!")
+
         
         try:
             # Step 0: Optional high-quality audio cleaning (disabled by default)
@@ -1111,35 +1092,27 @@ class ChatterboxVC:
                 f.write(sample_mp3_bytes)
             logger.info(f"    - Sample audio saved: {sample_local_path}")
             
-            # Step 5: Prepare recorded audio path semantics
-            logger.info(f"  - Step 5: Preparing recorded audio path semantics...")
-            recorded_audio_path_local = None
-            recorded_pointer = None
-            recorded_in_metadata = (metadata or {}).get('recorded_path')
-            if recorded_in_metadata:
-                # A client-supplied recorded Storage path exists → do NOT upload duplicate
-                recorded_pointer = str(recorded_in_metadata)
-                logger.info(f"    - Provided recorded_path pointer: {recorded_pointer}")
-            else:
-                # Fallback to previous behavior: keep cleaned audio locally for upload
-                recorded_audio_path_local = recorded_filename
-                try:
-                    # If source is already WAV, copy/move; otherwise transcode to WAV
-                    _src_ext = os.path.splitext(processed_audio_path)[1].lower()
-                    if _src_ext == ".wav":
-                        if processed_audio_path != recorded_audio_path_local:
-                            import shutil
-                            shutil.move(processed_audio_path, recorded_audio_path_local)
-                        logger.info(f"    - Recorded source is WAV → {recorded_audio_path_local}")
-                    else:
-                        logger.info(f"    - Transcoding recorded source {_src_ext} → WAV")
-                        audio_tensor, sr = torchaudio.load(processed_audio_path)
-                        torchaudio.save(recorded_audio_path_local, audio_tensor, sr)
-                        logger.info(f"    - Transcoded to WAV: {recorded_audio_path_local} @ {sr}Hz")
-                except Exception as _e_conv:
-                    logger.warning(f"    - Failed to convert to WAV, fallback to move: {_e_conv}")
-                    import shutil
-                    shutil.move(processed_audio_path, recorded_audio_path_local)
+            # Step 5: Prepare recorded audio using exact filename from API
+            logger.info(f"  - Step 5: Preparing recorded audio with exact filename...")
+            recorded_audio_path_local = recorded_filename
+            
+            try:
+                # If source is already WAV, copy/move; otherwise transcode to WAV
+                _src_ext = os.path.splitext(processed_audio_path)[1].lower()
+                if _src_ext == ".wav":
+                    if processed_audio_path != recorded_audio_path_local:
+                        import shutil
+                        shutil.move(processed_audio_path, recorded_audio_path_local)
+                    logger.info(f"    - Recorded source is WAV → {recorded_audio_path_local}")
+                else:
+                    logger.info(f"    - Transcoding recorded source {_src_ext} → WAV")
+                    audio_tensor, sr = torchaudio.load(processed_audio_path)
+                    torchaudio.save(recorded_audio_path_local, audio_tensor, sr)
+                    logger.info(f"    - Transcoded to WAV: {recorded_audio_path_local} @ {sr}Hz")
+            except Exception as _e_conv:
+                logger.warning(f"    - Failed to convert to WAV, fallback to move: {_e_conv}")
+                import shutil
+                shutil.move(processed_audio_path, recorded_audio_path_local)
             
             generation_time = time.time() - start_time
             
@@ -1188,26 +1161,14 @@ class ChatterboxVC:
 
             # Use exact storage metadata from API
             storage_metadata = metadata.get("storage_metadata", {})
-            logger.info(f"🔍 STORAGE METADATA EXTRACTION:")
-            logger.info(f"  - Raw storage_metadata from API: {storage_metadata}")
-            logger.info(f"  - storage_metadata type: {type(storage_metadata)}")
-            logger.info(f"  - storage_metadata keys: {list(storage_metadata.keys()) if storage_metadata else 'None'}")
             
             if not storage_metadata:
-                logger.error(f"❌ CRITICAL: No storage_metadata found in API parameters!")
                 raise ValueError("storage_metadata is required but not provided")
 
             # Upload sample audio to exact path with exact metadata
             sample_storage_path = f"audio/voices/{language}/samples/{sample_filename}"
             if is_kids_voice:
                 sample_storage_path = f"audio/voices/{language}/kids/samples/{sample_filename}"
-            
-            logger.info(f"📤 UPLOADING SAMPLE AUDIO:")
-            logger.info(f"  - Local path: {sample_local_path}")
-            logger.info(f"  - Storage path: {sample_storage_path}")
-            logger.info(f"  - Filename: {sample_filename}")
-            logger.info(f"  - Content type: audio/mpeg")
-            logger.info(f"  - Metadata being used: {storage_metadata}")
             
             self.upload_to_firebase(
                 sample_local_path,
@@ -1216,63 +1177,21 @@ class ChatterboxVC:
                 metadata=storage_metadata
             )
             
-            # Upload recorded audio only if we didn't receive a pointer
-            rec_ext = None
-            mime_map = {
-                ".wav": "audio/wav",
-                ".flac": "audio/flac",
-                ".ogg": "audio/ogg",
-                ".aiff": "audio/aiff",
-                ".aif": "audio/aiff",
-                ".mp3": "audio/mpeg",
-                ".m4a": "audio/mp4",
-                ".aac": "audio/aac",
-                ".wma": "audio/x-ms-wma",
-                ".opus": "audio/opus",
-            }
-            recorded_path_for_response = None
-            if recorded_pointer:
-                # Use pointer directly in outputs; skip upload
-                recorded_path_for_response = recorded_pointer
-                logger.info("    - Skipping recorded upload (client-provided recorded_path)")
-                # Try to infer extension for Firestore doc
-                _lp = recorded_pointer.lower()
-                for ext in mime_map.keys():
-                    if _lp.endswith(ext):
-                        rec_ext = ext
-                        break
-                if not rec_ext:
-                    rec_ext = ".wav"
-            else:
-                # Proceed with upload as before
-                rec_ext = ".wav"
-                rec_ct = mime_map.get(rec_ext, "application/octet-stream")
-                logger.info(f"📤 UPLOADING RECORDED AUDIO:")
-                logger.info(f"  - Local path: {recorded_audio_path_local}")
-                logger.info(f"  - Storage path: {base_path}/recorded/{recorded_filename}")
-                logger.info(f"  - Filename: {recorded_filename}")
-                logger.info(f"  - Content type: {rec_ct}")
-                logger.info(f"  - Metadata being used: {storage_metadata}")
-                
-                self.upload_to_firebase(
-                    recorded_audio_path_local,
-                    f"{base_path}/recorded/{recorded_filename}",
-                    content_type=rec_ct,
-                    metadata=storage_metadata
-                )
-                recorded_path_for_response = recorded_filename
+            # Upload recorded audio using exact filename from API
+            rec_ext = ".wav"
+            rec_ct = "audio/wav"
+            self.upload_to_firebase(
+                recorded_audio_path_local,
+                f"{base_path}/recorded/{recorded_filename}",
+                content_type=rec_ct,
+                metadata=storage_metadata
+            )
+            recorded_path_for_response = recorded_filename
             
             # Upload voice profile to exact path with exact metadata
             profile_storage_path = f"audio/voices/{language}/profiles/{profile_filename}"
             if is_kids_voice:
                 profile_storage_path = f"audio/voices/{language}/kids/profiles/{profile_filename}"
-            
-            logger.info(f"📤 UPLOADING VOICE PROFILE:")
-            logger.info(f"  - Local path: {profile_local_path}")
-            logger.info(f"  - Storage path: {profile_storage_path}")
-            logger.info(f"  - Filename: {profile_filename}")
-            logger.info(f"  - Content type: application/octet-stream")
-            logger.info(f"  - Metadata being used: {storage_metadata}")
             
             self.upload_to_firebase(
                 profile_local_path,
@@ -1315,9 +1234,7 @@ class ChatterboxVC:
                         "status": "ready",
                         "samplePath": f"{base_path}/samples/{sample_filename}",
                         "profilePath": f"{base_path}/profiles/{profile_filename}",
-                        "recordedPath": (
-                            recorded_pointer if recorded_pointer else f"{base_path}/recorded/{recorded_filename}"
-                        ),
+                        "recordedPath": f"{base_path}/recorded/{recorded_filename}",
                         "createdAt": SERVER_TIMESTAMP,
                         "updatedAt": SERVER_TIMESTAMP,
                         "metadata": metadata or {},
@@ -1348,10 +1265,10 @@ class ChatterboxVC:
                     import hmac, hashlib, time, json
                     from urllib.parse import urlparse
                     from urllib.request import Request, urlopen
-                    # Build canonical storage paths
+                    # Build canonical storage paths using exact filenames
                     kids_segment = 'kids/' if is_kids_voice else ''
-                    profile_path = f"audio/voices/{language}/{kids_segment}profiles/{voice_id}.npy"
-                    sample_path = f"audio/voices/{language}/{kids_segment}samples/{voice_id}.mp3"
+                    profile_path = f"audio/voices/{language}/{kids_segment}profiles/{profile_filename}"
+                    sample_path = f"audio/voices/{language}/{kids_segment}samples/{sample_filename}"
                     payload = {
                         'status': 'success',
                         'user_id': storage_metadata.get('user_id', ''),
@@ -1362,9 +1279,7 @@ class ChatterboxVC:
                         'sample_path': sample_path,
                     }
                     
-                    logger.info(f"📞 SUCCESS CALLBACK PAYLOAD:")
-                    logger.info(f"  - Callback URL: {cb_url}")
-                    logger.info(f"  - Payload: {payload}")
+
                     secret = os.getenv('DAEZEND_API_SHARED_SECRET')
                     if secret:
                         parsed = urlparse(cb_url)
@@ -1410,9 +1325,7 @@ class ChatterboxVC:
                         'error': str(e),
                     }
                     
-                    logger.info(f"📞 ERROR CALLBACK PAYLOAD:")
-                    logger.info(f"  - Callback URL: {cb_url}")
-                    logger.info(f"  - Payload: {payload}")
+
                     secret = os.getenv('DAEZEND_API_SHARED_SECRET')
                     if secret:
                         parsed = urlparse(cb_url)
@@ -1539,21 +1452,6 @@ def clone_voice(
         tmp.flush()
         tmp.close()
 
-        # Log all input parameters for debugging
-        logger.info(f"🔍 CLONE_VOICE INPUT PARAMETERS:")
-        logger.info(f"  - user_id: {user_id}")
-        logger.info(f"  - name: {name}")
-        logger.info(f"  - language: {language}")
-        logger.info(f"  - is_kids_voice: {is_kids_voice}")
-        logger.info(f"  - model_type: {model_type}")
-        logger.info(f"  - voice_id: {voice_id}")
-        logger.info(f"  - audio_path: {audio_path}")
-        logger.info(f"  - profile_filename: {profile_filename}")
-        logger.info(f"  - sample_filename: {sample_filename}")
-        logger.info(f"  - output_basename: {output_basename}")
-        logger.info(f"  - storage_metadata: {storage_metadata}")
-        logger.info(f"  - callback_url: {callback_url}")
-        
         # Load models and run clone with exact API parameters
         device = "cpu"
         vc = ChatterboxVC.from_pretrained(device)
@@ -1599,11 +1497,6 @@ def clone_voice(
                 "updatedAt": SERVER_TIMESTAMP,
                 "metadata": result.get("metadata", {}),
             }
-            
-            logger.info(f"🗄️ FIRESTORE DOCUMENT CREATION:")
-            logger.info(f"  - Document ID: {doc_id}")
-            logger.info(f"  - Collection: voice_profiles")
-            logger.info(f"  - Document data: {firestore_doc}")
             
             doc_ref.set(firestore_doc, merge=True)
             return result
