@@ -974,6 +974,7 @@ class ChatterboxVC:
             # Set metadata if provided
             if metadata:
                 blob.metadata = metadata
+                logger.info(f"📋 Setting metadata on blob: {metadata}")
             
             # Upload directly from file path (more memory efficient)
             blob.upload_from_filename(file_path, content_type=content_type)
@@ -982,6 +983,14 @@ class ChatterboxVC:
             if metadata:
                 try:
                     blob.patch()
+                    logger.info(f"✅ Patched metadata for: {destination_blob_name}")
+                    # Verify and retry once if needed
+                    blob.reload()
+                    if not blob.metadata or any(k not in (blob.metadata or {}) for k in metadata.keys()):
+                        logger.warning(f"⚠️ Metadata not present after patch; retrying set+patch for {destination_blob_name}")
+                        blob.metadata = metadata
+                        blob.patch()
+                        blob.reload()
                 except Exception as _patch_e:
                     logger.warning(f"⚠️ Could not patch metadata for {destination_blob_name}: {_patch_e}")
             
@@ -1047,14 +1056,15 @@ class ChatterboxVC:
             
             profile_filename = metadata.get("profile_filename")
             sample_filename = metadata.get("sample_filename")
-            recorded_filename = metadata.get("recorded_filename")
+            recorded_path_pointer = metadata.get("recorded_path")  # pointer to existing recorded file in Storage
             
             if not profile_filename:
                 raise ValueError("metadata.profile_filename is required")
             if not sample_filename:
                 raise ValueError("metadata.sample_filename is required")
-            if not recorded_filename:
-                raise ValueError("metadata.recorded_filename is required")
+            # recorded upload is not required; recorded_path may be a pointer to existing file
+            # Use filenames exactly as provided by the API with no modifications
+            logger.info(f"    - Using API filenames as-is → profile: {profile_filename}, sample: {sample_filename}, recorded: {recorded_filename}")
             
             user_id_meta = str(metadata.get("user_id", ""))
 
@@ -1099,27 +1109,8 @@ class ChatterboxVC:
                 f.write(sample_mp3_bytes)
             logger.info(f"    - Sample audio saved: {sample_local_path}")
             
-            # Step 5: Prepare recorded audio using exact filename from API
-            logger.info(f"  - Step 5: Preparing recorded audio with exact filename...")
-            recorded_audio_path_local = recorded_filename
-            
-            try:
-                # If source is already WAV, copy/move; otherwise transcode to WAV
-                _src_ext = os.path.splitext(processed_audio_path)[1].lower()
-                if _src_ext == ".wav":
-                    if processed_audio_path != recorded_audio_path_local:
-                        import shutil
-                        shutil.move(processed_audio_path, recorded_audio_path_local)
-                    logger.info(f"    - Recorded source is WAV → {recorded_audio_path_local}")
-                else:
-                    logger.info(f"    - Transcoding recorded source {_src_ext} → WAV")
-                    audio_tensor, sr = torchaudio.load(processed_audio_path)
-                    torchaudio.save(recorded_audio_path_local, audio_tensor, sr)
-                    logger.info(f"    - Transcoded to WAV: {recorded_audio_path_local} @ {sr}Hz")
-            except Exception as _e_conv:
-                logger.warning(f"    - Failed to convert to WAV, fallback to move: {_e_conv}")
-                import shutil
-                shutil.move(processed_audio_path, recorded_audio_path_local)
+            # Step 5: Recorded file handling is skipped for uploads; we honor the existing pointer
+            recorded_audio_path_local = None
             
             generation_time = time.time() - start_time
             
@@ -1167,21 +1158,16 @@ class ChatterboxVC:
                 logger.warning(f"⚠️ Failed to pre-create Firestore voice_profiles doc: {e}")
 
             # Use exact storage metadata from API; accept multiple shapes for backward compatibility
-            storage_metadata = (metadata or {}).get("storage_metadata") or (metadata or {}).get("metadata") or {}
-            # If still empty, synthesize from known fields (last-resort fallback)
-            if not storage_metadata:
-                storage_metadata = {
-                    "user_id": str(metadata.get("user_id", "")),
-                    "voice_id": str(voice_id or ""),
-                    "voice_name": str(voice_name or ""),
-                    "language": str((metadata or {}).get("language", "en")),
-                    "is_kids_voice": str(bool((metadata or {}).get("is_kids_voice", False))).lower(),
-                }
-            else:
-                # Normalize values to strings for Storage metadata
-                storage_metadata = {
-                    k: (str(v).lower() if k == "is_kids_voice" else str(v)) for k, v in storage_metadata.items()
-                }
+            base_meta = (metadata or {}).get("storage_metadata") or (metadata or {}).get("metadata") or {}
+            # Normalize and enrich required fields
+            enriched = {
+                "user_id": str((base_meta or {}).get("user_id", (metadata or {}).get("user_id", ""))),
+                "voice_id": str((base_meta or {}).get("voice_id", voice_id or "")),
+                "voice_name": str((base_meta or {}).get("voice_name", voice_name or "")),
+                "language": str((base_meta or {}).get("language", (metadata or {}).get("language", "en"))),
+                "is_kids_voice": str(bool((metadata or {}).get("is_kids_voice", False))).lower(),
+                "model_type": str((metadata or {}).get("model_type", "chatterbox")),
+            }
 
             # Upload sample audio to exact path with exact metadata
             sample_storage_path = f"audio/voices/{language}/samples/{sample_filename}"
@@ -1192,19 +1178,12 @@ class ChatterboxVC:
                 sample_local_path,
                 sample_storage_path,
                 content_type="audio/mpeg",
-                metadata=storage_metadata
+                metadata=enriched
             )
             
             # Upload recorded audio using exact filename from API
-            rec_ext = ".wav"
-            rec_ct = "audio/wav"
-            self.upload_to_firebase(
-                recorded_audio_path_local,
-                f"{base_path}/recorded/{recorded_filename}",
-                content_type=rec_ct,
-                metadata=storage_metadata
-            )
-            recorded_path_for_response = recorded_filename
+            # Do not upload recorded audio; use pointer if provided
+            recorded_path_for_response = recorded_path_pointer
             
             # Upload voice profile to exact path with exact metadata
             profile_storage_path = f"audio/voices/{language}/profiles/{profile_filename}"
@@ -1215,7 +1194,7 @@ class ChatterboxVC:
                 profile_local_path,
                 profile_storage_path,
                 content_type="application/octet-stream",
-                metadata=storage_metadata
+                metadata=enriched
             )
             
             # Return JSON-serializable response
@@ -1252,7 +1231,7 @@ class ChatterboxVC:
                         "status": "ready",
                         "samplePath": f"{base_path}/samples/{sample_filename}",
                         "profilePath": f"{base_path}/profiles/{profile_filename}",
-                        "recordedPath": f"{base_path}/recorded/{recorded_filename}",
+                        "recordedPath": recorded_path_for_response,
                         "createdAt": SERVER_TIMESTAMP,
                         "updatedAt": SERVER_TIMESTAMP,
                         "metadata": metadata or {},
