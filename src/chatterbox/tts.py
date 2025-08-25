@@ -84,10 +84,10 @@ def punc_norm(text: str) -> str:
         ("—", "-"),
         ("–", "-"),
         (" ,", ","),
-        ("“", "\""),
-        ("”", "\""),
-        ("‘", "'"),
-        ("’", "'"),
+        ("", "\""),
+        ("", "\""),
+        ("'", "'"),
+        ("'", "'"),
     ]
     for old_char_sequence, new_char in punc_to_replace:
         text = text.replace(old_char_sequence, new_char)
@@ -124,6 +124,7 @@ class ChunkInfo:
     paragraph_break_after: bool
     dialogue_ratio: float
     complexity_score: float
+    has_story_break: bool = False  # Whether this chunk should have a story break pause
 
 
 class SmartChunker:
@@ -339,7 +340,8 @@ class SmartChunker:
             ending_punctuation=ending_punct,
             paragraph_break_after=False,  # Set by caller
             dialogue_ratio=dialogue_ratio,
-            complexity_score=complexity
+            complexity_score=complexity,
+            has_story_break=False  # Set by caller if needed
         )
     
     def _get_content_type_distribution(self, chunks: List[ChunkInfo]) -> Dict[str, int]:
@@ -501,6 +503,9 @@ class AdvancedTextSanitizer:
             '»': '"',
             '„': '"',
             '"': '"',
+            
+            # Story section breaks
+            '⁂': ' <STORY_BREAK> ',  # Special marker for longer pauses between story sections
             
             # Mathematical symbols
             '×': ' times ',
@@ -767,7 +772,10 @@ class AdvancedTextSanitizer:
         # 6. Clean spacing and punctuation
         text = self.clean_spacing_and_punctuation(text)
         
-        # 7. Final normalization
+        # 7. Remove story break markers (they're handled separately for pause timing)
+        text = text.replace('<STORY_BREAK>', '')
+        
+        # 8. Final normalization
         # Capitalize first letter
         if text and text[0].islower():
             text = text[0].upper() + text[1:]
@@ -997,6 +1005,7 @@ class AdvancedStitcher:
             '-': 100,   # Dash: short pause for quick aside
             '—': 200,   # Em dash: medium pause for emphasis
             '\n': 320,  # Paragraph: longest pause for topic change
+            '<STORY_BREAK>': 550,  # Story section break: very long pause for dramatic effect
         }
         
         # Content type pause modifiers
@@ -1030,9 +1039,14 @@ class AdvancedStitcher:
     def calculate_smart_pause(self, chunk_info: ChunkInfo, next_chunk_info: Optional[ChunkInfo] = None) -> int:
         """Calculate optimal pause duration based on context"""
         
-        # Get base pause from ending punctuation
-        ending_punct = chunk_info.ending_punctuation
-        base_pause = self.punctuation_pauses.get(ending_punct, 200)
+        # Check for story break first (highest priority)
+        if chunk_info.has_story_break:
+            base_pause = self.punctuation_pauses.get('<STORY_BREAK>', 800)
+            logger.info(f"🎭 Story break detected - applying {base_pause}ms pause")
+        else:
+            # Get base pause from ending punctuation
+            ending_punct = chunk_info.ending_punctuation
+            base_pause = self.punctuation_pauses.get(ending_punct, 200)
         
         # Apply content type modifier
         content_modifier = self.content_type_modifiers.get(chunk_info.content_type, 1.0)
@@ -1425,7 +1439,16 @@ class ChatterboxTTS:
         self.max_parallel_workers = 2  # Conservative for GPU memory
         self.enable_parallel_processing = True
         
-        logger.info(f"✅ ChatterboxTTS initialized successfully")
+        # Phase 1: Conditional Caching
+        self._cached_conditionals = None
+        self._cached_voice_profile_path = None
+        self._cached_exaggeration = None
+        self._cached_saved_voice_path = None
+        self._cached_audio_prompt_path = None
+        self._conditional_cache_hits = 0
+        self._conditional_cache_misses = 0
+        
+        logger.info(f"✅ ChatterboxTTS initialized successfully with conditional caching")
         logger.info(f"  - Available methods: {[m for m in dir(self) if not m.startswith('_')]}")
         
         # Debug: Check for specific methods
@@ -1454,6 +1477,110 @@ class ChatterboxTTS:
             logger.error(f"❌ MISSING METHODS: {missing_methods}")
         else:
             logger.info(f"✅ All expected methods are available!")
+
+    def _get_or_prepare_conditionals(self, voice_profile_path: str = None, 
+                                   saved_voice_path: str = None, 
+                                   audio_prompt_path: str = None,
+                                   exaggeration: float = 0.5) -> Conditionals:
+        """
+        Get cached conditionals or prepare new ones.
+        This is the core optimization that eliminates redundant conditional preparation.
+        
+        Args:
+            voice_profile_path: Path to voice profile (.npy)
+            saved_voice_path: Path to saved voice embedding
+            audio_prompt_path: Path to audio prompt file
+            exaggeration: Voice exaggeration factor
+            
+        Returns:
+            Conditionals object ready for use
+        """
+        # Determine cache key based on input parameters
+        if voice_profile_path:
+            cache_key = ('voice_profile', voice_profile_path, exaggeration)
+            current_path = voice_profile_path
+            current_type = 'voice_profile'
+        elif saved_voice_path and audio_prompt_path:
+            cache_key = ('saved_voice', saved_voice_path, audio_prompt_path, exaggeration)
+            current_path = f"{saved_voice_path}+{audio_prompt_path}"
+            current_type = 'saved_voice'
+        elif audio_prompt_path:
+            cache_key = ('audio_prompt', audio_prompt_path, exaggeration)
+            current_path = audio_prompt_path
+            current_type = 'audio_prompt'
+        else:
+            raise ValueError("Must provide one of: voice_profile_path, (saved_voice_path + audio_prompt_path), or audio_prompt_path")
+        
+        # Check if we have valid cached conditionals
+        if (self._cached_conditionals is not None and 
+            cache_key == self._get_cache_key()):
+            
+            self._conditional_cache_hits += 1
+            logger.debug(f"♻️ Conditional cache HIT ({self._conditional_cache_hits} hits, {self._conditional_cache_misses} misses)")
+            logger.debug(f"   - Reusing conditionals for: {current_type} = {current_path}")
+            return self._cached_conditionals
+        
+        # Cache miss - prepare new conditionals
+        self._conditional_cache_misses += 1
+        logger.info(f"🔄 Conditional cache MISS - preparing new conditionals")
+        logger.info(f"   - Type: {current_type}")
+        logger.info(f"   - Path: {current_path}")
+        logger.info(f"   - Exaggeration: {exaggeration}")
+        
+        # Prepare conditionals based on type
+        if voice_profile_path:
+            self.prepare_conditionals_with_voice_profile(voice_profile_path, exaggeration)
+        elif saved_voice_path and audio_prompt_path:
+            self.prepare_conditionals_with_saved_voice(saved_voice_path, audio_prompt_path, exaggeration)
+        elif audio_prompt_path:
+            self.prepare_conditionals(audio_prompt_path, exaggeration)
+        
+        # Cache the prepared conditionals
+        self._cached_conditionals = self.conds
+        self._cached_voice_profile_path = voice_profile_path
+        self._cached_saved_voice_path = saved_voice_path
+        self._cached_audio_prompt_path = audio_prompt_path
+        self._cached_exaggeration = exaggeration
+        
+        logger.info(f"✅ Conditionals prepared and cached successfully")
+        return self.conds
+    
+    def _get_cache_key(self):
+        """Get the current cache key for comparison"""
+        if self._cached_voice_profile_path:
+            return ('voice_profile', self._cached_voice_profile_path, self._cached_exaggeration)
+        elif self._cached_saved_voice_path and self._cached_audio_prompt_path:
+            return ('saved_voice', self._cached_saved_voice_path, self._cached_audio_prompt_path, self._cached_exaggeration)
+        elif self._cached_audio_prompt_path:
+            return ('audio_prompt', self._cached_audio_prompt_path, self._cached_exaggeration)
+        return None
+    
+    def clear_conditional_cache(self):
+        """Clear the conditional cache to free memory"""
+        logger.info("🧹 Clearing conditional cache")
+        self._cached_conditionals = None
+        self._cached_voice_profile_path = None
+        self._cached_saved_voice_path = None
+        self._cached_audio_prompt_path = None
+        self._cached_exaggeration = None
+        
+        # Clear GPU cache if available
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            logger.debug("🧹 GPU cache cleared")
+    
+    def get_conditional_cache_stats(self):
+        """Get conditional cache statistics"""
+        total_requests = self._conditional_cache_hits + self._conditional_cache_misses
+        hit_rate = (self._conditional_cache_hits / total_requests * 100) if total_requests > 0 else 0
+        
+        return {
+            'hits': self._conditional_cache_hits,
+            'misses': self._conditional_cache_misses,
+            'total_requests': total_requests,
+            'hit_rate_percent': hit_rate,
+            'cache_size': 1 if self._cached_conditionals is not None else 0
+        }
 
     @classmethod
     def from_local(cls, ckpt_dir, device) -> 'ChatterboxTTS':
@@ -1717,17 +1844,13 @@ class ChatterboxTTS:
         cfg_weight=0.5,
         temperature=0.8,
     ):
-        if voice_profile_path:
-            # Use complete voice profile for most accurate TTS
-            self.prepare_conditionals_with_voice_profile(voice_profile_path, exaggeration=exaggeration)
-        elif saved_voice_path and audio_prompt_path:
-            # Use saved voice embedding with fresh prompt audio for prosody
-            self.prepare_conditionals_with_saved_voice(saved_voice_path, audio_prompt_path, exaggeration=exaggeration)
-        elif audio_prompt_path:
-            # Traditional method: compute everything fresh
-            self.prepare_conditionals(audio_prompt_path, exaggeration=exaggeration)
-        else:
-            assert self.conds is not None, "Please `prepare_conditionals` first, specify `audio_prompt_path`, or provide `voice_profile_path`, or provide both `saved_voice_path` and `audio_prompt_path`"
+        # Phase 1: Use conditional caching to avoid redundant preparation
+        self.conds = self._get_or_prepare_conditionals(
+            voice_profile_path=voice_profile_path,
+            saved_voice_path=saved_voice_path,
+            audio_prompt_path=audio_prompt_path,
+            exaggeration=exaggeration
+        )
 
         # Norm and tokenize text
         text = punc_norm(text)
@@ -1778,14 +1901,27 @@ class ChatterboxTTS:
         :param max_chars: Maximum number of characters per chunk
         :return: List of ChunkInfo objects with full analysis
         """
-        # Step 1: Advanced text sanitization
+        # Step 1: Detect story breaks before sanitization
+        story_break_positions = []
+        if '⁂' in text:
+            # Find all story break positions in the original text
+            start_pos = 0
+            while True:
+                pos = text.find('⁂', start_pos)
+                if pos == -1:
+                    break
+                story_break_positions.append(pos)
+                start_pos = pos + 1
+            logger.info(f"🎭 Found {len(story_break_positions)} story break(s) at positions: {story_break_positions}")
+        
+        # Step 2: Advanced text sanitization
         logger.info(f"🧹 Applying advanced text sanitization to {len(text)} characters")
         sanitized_text = self.text_sanitizer.deep_clean(text)
         
         if len(sanitized_text) != len(text):
             logger.info(f"🧹 Text sanitization: {len(text)} → {len(sanitized_text)} characters")
         
-        # Step 2: Smart chunking with optional lead-sentence split
+        # Step 3: Smart chunking with optional lead-sentence split
         target_chars = int(max_chars * 0.8)  # Target 80% of max for better quality
 
         # Heuristic: make the very first chunk end at the first '.' if it appears early
@@ -1811,6 +1947,10 @@ class ChatterboxTTS:
         else:
             chunk_infos = self.smart_chunker.smart_chunk(sanitized_text, target_chars, max_chars)
         
+        # Step 4: Mark chunks that should have story break pauses
+        if story_break_positions:
+            self._mark_story_break_chunks(chunk_infos, story_break_positions, text)
+        
         # Log detailed chunk analysis
         if chunk_infos:
             total_chars = sum(chunk.char_count for chunk in chunk_infos)
@@ -1831,6 +1971,40 @@ class ChatterboxTTS:
                 logger.info(f"   - Problematic chars removed: {original_problematic - sanitized_problematic}")
         
         return chunk_infos
+    
+    def _mark_story_break_chunks(self, chunk_infos: List[ChunkInfo], story_break_positions: List[int], original_text: str) -> None:
+        """
+        Mark chunks that should have story break pauses based on original text positions.
+        
+        :param chunk_infos: List of chunk info objects
+        :param story_break_positions: Positions of '⁂' symbols in original text
+        :param original_text: Original text before sanitization
+        """
+        if not story_break_positions or not chunk_infos:
+            return
+        
+        # Calculate cumulative character positions for each chunk in original text
+        cumulative_chars = 0
+        chunk_boundaries = []
+        
+        for chunk in chunk_infos:
+            # Find this chunk's text in the original text (approximate)
+            chunk_start = cumulative_chars
+            chunk_end = cumulative_chars + chunk.char_count
+            chunk_boundaries.append((chunk_start, chunk_end))
+            cumulative_chars += chunk.char_count
+        
+        # Mark chunks that contain story breaks
+        for break_pos in story_break_positions:
+            for i, (start, end) in enumerate(chunk_boundaries):
+                if start <= break_pos <= end:
+                    chunk_infos[i].has_story_break = True
+                    logger.info(f"🎭 Marked chunk {i} for story break pause")
+                    break
+        
+        # Log summary
+        story_break_chunks = sum(1 for chunk in chunk_infos if chunk.has_story_break)
+        logger.info(f"🎭 Story break analysis: {len(story_break_positions)} breaks → {story_break_chunks} chunks marked")
     
     def simple_sentence_split(self, text: str) -> List[str]:
         """
@@ -1863,7 +2037,8 @@ class ChatterboxTTS:
         logger.info(f"✅ Split into {len(sentences)} sentences")
         return sentences
 
-    def _generate_single_chunk_with_quality(self, chunk_info: ChunkInfo, voice_profile_path: str) -> Tuple[str, QualityScore]:
+    def _generate_single_chunk_with_quality(self, chunk_info: ChunkInfo, voice_profile_path: str, 
+                                          pre_prepared_conditionals: Conditionals = None) -> Tuple[str, QualityScore]:
         """Generate a single chunk with quality analysis and retry logic"""
         adaptive_params = self.param_manager.get_adaptive_parameters(chunk_info)
         max_retries = 3
@@ -1874,17 +2049,28 @@ class ChatterboxTTS:
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
                 
-                # Generate audio tensor using adaptive parameters
-                audio_tensor = self.generate(
-                    text=chunk_info.text,
-                    voice_profile_path=voice_profile_path,
-                    temperature=adaptive_params["temperature"],
-                    exaggeration=adaptive_params["exaggeration"],
-                    cfg_weight=adaptive_params["cfg_weight"],
-                    repetition_penalty=adaptive_params["repetition_penalty"],
-                    min_p=adaptive_params["min_p"],
-                    top_p=adaptive_params["top_p"]
-                )
+                # Store original conditionals if we have pre-prepared ones
+                original_conds = None
+                if pre_prepared_conditionals is not None:
+                    original_conds = self.conds
+                    self.conds = pre_prepared_conditionals
+                
+                try:
+                    # Generate audio tensor using adaptive parameters
+                    audio_tensor = self.generate(
+                        text=chunk_info.text,
+                        voice_profile_path=voice_profile_path,
+                        temperature=adaptive_params["temperature"],
+                        exaggeration=adaptive_params["exaggeration"],
+                        cfg_weight=adaptive_params["cfg_weight"],
+                        repetition_penalty=adaptive_params["repetition_penalty"],
+                        min_p=adaptive_params["min_p"],
+                        top_p=adaptive_params["top_p"]
+                    )
+                finally:
+                    # Restore original conditionals if we modified them
+                    if original_conds is not None:
+                        self.conds = original_conds
                 
                 # Save to temporary file
                 temp_wav = tempfile.NamedTemporaryFile(suffix=f"_chunk_{chunk_info.id}_attempt_{attempt}.wav", delete=False)
@@ -1910,7 +2096,8 @@ class ChatterboxTTS:
         
         raise RuntimeError(f"Failed to generate acceptable quality for chunk {chunk_info.id}")
     
-    def generate_chunks_parallel(self, chunk_infos: List[ChunkInfo], voice_profile_path: str) -> List[Tuple[str, QualityScore]]:
+    def generate_chunks_parallel(self, chunk_infos: List[ChunkInfo], voice_profile_path: str, 
+                               pre_prepared_conditionals: Conditionals = None) -> List[Tuple[str, QualityScore]]:
         """Generate chunks in parallel with quality analysis"""
         logger.info(f"🚀 Starting parallel chunk generation ({self.max_parallel_workers} workers)")
         
@@ -1918,7 +2105,7 @@ class ChatterboxTTS:
         with ThreadPoolExecutor(max_workers=self.max_parallel_workers) as executor:
             # Submit all tasks
             future_to_chunk = {
-                executor.submit(self._generate_single_chunk_with_quality, chunk_info, voice_profile_path): chunk_info
+                executor.submit(self._generate_single_chunk_with_quality, chunk_info, voice_profile_path, pre_prepared_conditionals): chunk_info
                 for chunk_info in chunk_infos
             }
             
@@ -1947,6 +2134,7 @@ class ChatterboxTTS:
                        base_cfg_weight: float = 0.5) -> List[str]:
         """
         Advanced chunk generation with parallel processing and quality analysis.
+        Now optimized with conditional caching for improved performance.
 
         :param chunk_infos: List of ChunkInfo objects with full analysis
         :param voice_profile_path: Path to the voice profile (.npy)
@@ -1957,28 +2145,21 @@ class ChatterboxTTS:
         """
         generation_start = time.time()
         
-        if self.enable_parallel_processing and len(chunk_infos) > 1:
-            # Use parallel processing with quality analysis
-            logger.info(f"🚀 Using parallel processing for {len(chunk_infos)} chunks")
-            chunk_results = self.generate_chunks_parallel(chunk_infos, voice_profile_path)
-            wav_paths = [wav_path for wav_path, _ in chunk_results]
-            quality_scores = [quality_score for _, quality_score in chunk_results]
-        else:
-            # Use sequential processing (fallback or single chunk)
-            logger.info(f"🔄 Using sequential processing for {len(chunk_infos)} chunks")
-            wav_paths = []
-            quality_scores = []
-            
-            for chunk_info in chunk_infos:
-                wav_path, quality_score = self._generate_single_chunk_with_quality(chunk_info, voice_profile_path)
-                wav_paths.append(wav_path)
-                quality_scores.append(quality_score)
+        # Phase 1: Prepare conditionals once for all chunks (major optimization)
+        logger.info(f"🎯 Preparing conditionals once for {len(chunk_infos)} chunks")
+        pre_prepared_conditionals = self._get_or_prepare_conditionals(
+            voice_profile_path=voice_profile_path,
+            exaggeration=base_exaggeration
+        )
         
-        # Log comprehensive quality analysis
-        total_generation_time = time.time() - generation_start
-        self._log_quality_analysis(chunk_infos, quality_scores, total_generation_time)
+        # Log cache performance
+        cache_stats = self.get_conditional_cache_stats()
+        logger.info(f"📊 Conditional cache stats: {cache_stats['hits']} hits, {cache_stats['misses']} misses ({cache_stats['hit_rate_percent']:.1f}% hit rate)")
         
-        return wav_paths
+        # Use the centralized generation logic
+        return self._generate_chunks_with_prepared_conditionals(
+            chunk_infos, pre_prepared_conditionals, generation_start
+        )
     
     def _log_quality_analysis(self, chunk_infos: List[ChunkInfo], quality_scores: List[QualityScore], total_time: float):
         """Log comprehensive quality analysis results"""
@@ -2115,51 +2296,12 @@ class ChatterboxTTS:
         logger.info(f"🔍 Final output path: {output_path}")
         logger.info(f"🔍 Output file exists: {Path(output_path).exists()}")
         
-        # Enhanced metadata with advanced features analysis
-        if chunk_infos:
-            content_type_dist = self.smart_chunker._get_content_type_distribution(chunk_infos)
-            avg_complexity = sum(c.complexity_score for c in chunk_infos) / len(chunk_infos)
-            avg_chunk_chars = sum(c.char_count for c in chunk_infos) / len(chunk_infos)
-            dialogue_chunks = sum(1 for c in chunk_infos if c.content_type == ContentType.DIALOGUE)
-            paragraph_breaks = sum(1 for c in chunk_infos if c.paragraph_break_after)
-        else:
-            content_type_dist = {}
-            avg_complexity = 0
-            avg_chunk_chars = 0
-            dialogue_chunks = 0
-            paragraph_breaks = 0
-        
-        metadata = {
-            # Basic metrics
-            "chunk_count": len(chunk_infos),
-            "output_path": output_path,
-            "duration_sec": total_duration,
-            "successful_chunks": len(wav_paths),
-            "sample_rate": sample_rate,
-            "text_length": len(text),
-            "max_chars_per_chunk": max_chars,
-            "pause_ms": pause_ms,
-            "pause_scale": pause_scale,
-            
-            # Smart chunking analysis
-            "avg_chunk_chars": round(avg_chunk_chars, 1),
-            "avg_complexity_score": round(avg_complexity, 2),
-            "content_type_distribution": content_type_dist,
-            "dialogue_chunk_count": dialogue_chunks,
-            "paragraph_breaks": paragraph_breaks,
-            "chunking_method": "smart_content_aware",
-            
-            # Advanced features
-            "text_sanitization": "advanced_unicode_normalization",
-            "parallel_processing": self.enable_parallel_processing,
-            "max_parallel_workers": self.max_parallel_workers if self.enable_parallel_processing else 1,
-            "quality_analysis": "comprehensive_audio_validation",
-            "stitching_method": "advanced_context_aware_transitions",
-            
-            # Performance metrics
-            "audio_chars_per_second": round(len(text) / max(total_duration, 0.1), 1),  # Characters per second of audio
-            "audio_efficiency_ratio": round(total_duration / max(len(text) * 0.08, 1), 2),  # Audio duration vs expected
-        }
+        # Enhanced metadata with cache performance
+        cache_stats = self.get_conditional_cache_stats()
+        metadata = self._create_generation_metadata(chunk_infos, total_duration, sample_rate, text, max_chars, 
+                                                  pause_ms, pause_scale, cache_stats)
+        metadata["output_path"] = output_path
+        metadata["successful_chunks"] = len(wav_paths)
         
         return audio_tensor, sample_rate, metadata
 
@@ -2501,3 +2643,275 @@ class ChatterboxTTS:
                 "error": str(e),
                 "generation_time": generation_time
             }
+
+    def generate_chunks_with_saved_voice(self, chunk_infos: List[ChunkInfo], saved_voice_path: str, 
+                                       audio_prompt_path: str, base_temperature: float = 0.8, 
+                                       base_exaggeration: float = 0.5, base_cfg_weight: float = 0.5) -> List[str]:
+        """
+        Generate chunks using saved voice + audio prompt with conditional caching optimization.
+        
+        :param chunk_infos: List of ChunkInfo objects with full analysis
+        :param saved_voice_path: Path to saved voice embedding
+        :param audio_prompt_path: Path to audio prompt file
+        :param base_temperature: Base temperature (will be adapted per chunk)
+        :param base_exaggeration: Base exaggeration (will be adapted per chunk)
+        :param base_cfg_weight: Base CFG weight (will be adapted per chunk)
+        :return: List of file paths to temporary WAV files
+        """
+        generation_start = time.time()
+        
+        # Phase 1: Prepare conditionals once for all chunks
+        logger.info(f"🎯 Preparing conditionals once for {len(chunk_infos)} chunks (saved voice + audio prompt)")
+        pre_prepared_conditionals = self._get_or_prepare_conditionals(
+            saved_voice_path=saved_voice_path,
+            audio_prompt_path=audio_prompt_path,
+            exaggeration=base_exaggeration
+        )
+        
+        # Log cache performance
+        cache_stats = self.get_conditional_cache_stats()
+        logger.info(f"📊 Conditional cache stats: {cache_stats['hits']} hits, {cache_stats['misses']} misses ({cache_stats['hit_rate_percent']:.1f}% hit rate)")
+        
+        # Use the same generation logic as the main method
+        return self._generate_chunks_with_prepared_conditionals(
+            chunk_infos, pre_prepared_conditionals, generation_start
+        )
+    
+    def generate_chunks_with_audio_prompt(self, chunk_infos: List[ChunkInfo], audio_prompt_path: str,
+                                        base_temperature: float = 0.8, base_exaggeration: float = 0.5, 
+                                        base_cfg_weight: float = 0.5) -> List[str]:
+        """
+        Generate chunks using audio prompt with conditional caching optimization.
+        
+        :param chunk_infos: List of ChunkInfo objects with full analysis
+        :param audio_prompt_path: Path to audio prompt file
+        :param base_temperature: Base temperature (will be adapted per chunk)
+        :param base_exaggeration: Base exaggeration (will be adapted per chunk)
+        :param base_cfg_weight: Base CFG weight (will be adapted per chunk)
+        :return: List of file paths to temporary WAV files
+        """
+        generation_start = time.time()
+        
+        # Phase 1: Prepare conditionals once for all chunks
+        logger.info(f"🎯 Preparing conditionals once for {len(chunk_infos)} chunks (audio prompt)")
+        pre_prepared_conditionals = self._get_or_prepare_conditionals(
+            audio_prompt_path=audio_prompt_path,
+            exaggeration=base_exaggeration
+        )
+        
+        # Log cache performance
+        cache_stats = self.get_conditional_cache_stats()
+        logger.info(f"📊 Conditional cache stats: {cache_stats['hits']} hits, {cache_stats['misses']} misses ({cache_stats['hit_rate_percent']:.1f}% hit rate)")
+        
+        # Use the same generation logic as the main method
+        return self._generate_chunks_with_prepared_conditionals(
+            chunk_infos, pre_prepared_conditionals, generation_start
+        )
+    
+    def _generate_chunks_with_prepared_conditionals(self, chunk_infos: List[ChunkInfo], 
+                                                  pre_prepared_conditionals: Conditionals,
+                                                  generation_start: float) -> List[str]:
+        """
+        Internal method to generate chunks with pre-prepared conditionals.
+        This centralizes the generation logic for all conditional types.
+        
+        :param chunk_infos: List of ChunkInfo objects
+        :param pre_prepared_conditionals: Pre-prepared conditionals
+        :param generation_start: Start time for performance tracking
+        :return: List of file paths to temporary WAV files
+        """
+        if self.enable_parallel_processing and len(chunk_infos) > 1:
+            # Use parallel processing with quality analysis
+            logger.info(f"🚀 Using parallel processing for {len(chunk_infos)} chunks")
+            chunk_results = self.generate_chunks_parallel(chunk_infos, None, pre_prepared_conditionals)
+            wav_paths = [wav_path for wav_path, _ in chunk_results]
+            quality_scores = [quality_score for _, quality_score in chunk_results]
+        else:
+            # Use sequential processing (fallback or single chunk)
+            logger.info(f"🔄 Using sequential processing for {len(chunk_infos)} chunks")
+            wav_paths = []
+            quality_scores = []
+            
+            for chunk_info in chunk_infos:
+                wav_path, quality_score = self._generate_single_chunk_with_quality(
+                    chunk_info, None, pre_prepared_conditionals
+                )
+                wav_paths.append(wav_path)
+                quality_scores.append(quality_score)
+        
+        # Log comprehensive quality analysis
+        total_generation_time = time.time() - generation_start
+        self._log_quality_analysis(chunk_infos, quality_scores, total_generation_time)
+        
+        return wav_paths
+
+    def generate_long_text_with_saved_voice(self, text: str, saved_voice_path: str, audio_prompt_path: str, 
+                                          output_path: str, max_chars: int = 500, pause_ms: int = 100, 
+                                          temperature: float = 0.8, exaggeration: float = 0.5, 
+                                          cfg_weight: float = 0.5, pause_scale: float = 1.0) -> Tuple[torch.Tensor, int, Dict]:
+        """
+        Generate long text TTS using saved voice + audio prompt with conditional caching optimization.
+        
+        :param text: Input text to synthesize
+        :param saved_voice_path: Path to saved voice embedding
+        :param audio_prompt_path: Path to audio prompt file
+        :param output_path: Path to save the final audio file
+        :param max_chars: Maximum number of characters per chunk
+        :param pause_ms: Milliseconds of silence between chunks
+        :param temperature: Generation temperature
+        :param exaggeration: Voice exaggeration factor
+        :param cfg_weight: CFG weight for generation
+        :param pause_scale: Global pause scaling factor
+        :return: Tuple of (audio_tensor, sample_rate, metadata_dict)
+        """
+        logger.info(f"🎵 Starting optimized TTS processing for {len(text)} characters (saved voice + audio prompt)")
+        logger.info(f"🔍 Output path: {output_path}")
+        
+        # Safety check for extremely long texts
+        if len(text) > 13000:
+            logger.warning(f"⚠️ Very long text ({len(text)} chars) - truncating to safe length")
+            text = text[:13000] + "... [truncated]"
+            logger.info(f"📝 Truncated text to {len(text)} characters")
+        
+        chunk_infos = self.chunk_text(text, max_chars)
+        logger.info(f"📦 Split into {len(chunk_infos)} intelligent chunks")
+        
+        # Apply global pace factor to advanced stitcher
+        try:
+            self.advanced_stitcher.global_pause_factor = max(0.5, min(2.0, float(pause_scale)))
+            logger.info(f"🕰️ Global pause scale set to {self.advanced_stitcher.global_pause_factor}")
+        except Exception:
+            logger.warning("⚠️ Failed to apply pause_scale; using default 1.0")
+        
+        wav_paths = self.generate_chunks_with_saved_voice(chunk_infos, saved_voice_path, audio_prompt_path, 
+                                                        temperature, exaggeration, cfg_weight)
+        if not wav_paths:
+            raise RuntimeError("Failed to generate any audio chunks")
+        
+        logger.info(f"🔗 Advanced stitching {len(wav_paths)} audio chunks...")
+        audio_tensor, sample_rate, total_duration = self.stitch_and_normalize(wav_paths, chunk_infos, output_path, pause_ms)
+        
+        self.cleanup_chunks(wav_paths)
+        
+        logger.info(f"✅ Optimized TTS processing completed | Duration: {total_duration:.2f}s")
+        logger.info(f"🔍 Final output path: {output_path}")
+        logger.info(f"🔍 Output file exists: {Path(output_path).exists()}")
+        
+        # Enhanced metadata with cache performance
+        cache_stats = self.get_conditional_cache_stats()
+        metadata = self._create_generation_metadata(chunk_infos, total_duration, sample_rate, text, max_chars, 
+                                                  pause_ms, pause_scale, cache_stats)
+        
+        return audio_tensor, sample_rate, metadata
+    
+    def generate_long_text_with_audio_prompt(self, text: str, audio_prompt_path: str, output_path: str,
+                                           max_chars: int = 500, pause_ms: int = 100, temperature: float = 0.8,
+                                           exaggeration: float = 0.5, cfg_weight: float = 0.5, 
+                                           pause_scale: float = 1.0) -> Tuple[torch.Tensor, int, Dict]:
+        """
+        Generate long text TTS using audio prompt with conditional caching optimization.
+        
+        :param text: Input text to synthesize
+        :param audio_prompt_path: Path to audio prompt file
+        :param output_path: Path to save the final audio file
+        :param max_chars: Maximum number of characters per chunk
+        :param pause_ms: Milliseconds of silence between chunks
+        :param temperature: Generation temperature
+        :param exaggeration: Voice exaggeration factor
+        :param cfg_weight: CFG weight for generation
+        :param pause_scale: Global pause scaling factor
+        :return: Tuple of (audio_tensor, sample_rate, metadata_dict)
+        """
+        logger.info(f"🎵 Starting optimized TTS processing for {len(text)} characters (audio prompt)")
+        logger.info(f"🔍 Output path: {output_path}")
+        
+        # Safety check for extremely long texts
+        if len(text) > 13000:
+            logger.warning(f"⚠️ Very long text ({len(text)} chars) - truncating to safe length")
+            text = text[:13000] + "... [truncated]"
+            logger.info(f"📝 Truncated text to {len(text)} characters")
+        
+        chunk_infos = self.chunk_text(text, max_chars)
+        logger.info(f"📦 Split into {len(chunk_infos)} intelligent chunks")
+        
+        # Apply global pace factor to advanced stitcher
+        try:
+            self.advanced_stitcher.global_pause_factor = max(0.5, min(2.0, float(pause_scale)))
+            logger.info(f"🕰️ Global pause scale set to {self.advanced_stitcher.global_pause_factor}")
+        except Exception:
+            logger.warning("⚠️ Failed to apply pause_scale; using default 1.0")
+        
+        wav_paths = self.generate_chunks_with_audio_prompt(chunk_infos, audio_prompt_path, 
+                                                         temperature, exaggeration, cfg_weight)
+        if not wav_paths:
+            raise RuntimeError("Failed to generate any audio chunks")
+        
+        logger.info(f"🔗 Advanced stitching {len(wav_paths)} audio chunks...")
+        audio_tensor, sample_rate, total_duration = self.stitch_and_normalize(wav_paths, chunk_infos, output_path, pause_ms)
+        
+        self.cleanup_chunks(wav_paths)
+        
+        logger.info(f"✅ Optimized TTS processing completed | Duration: {total_duration:.2f}s")
+        logger.info(f"🔍 Final output path: {output_path}")
+        logger.info(f"🔍 Output file exists: {Path(output_path).exists()}")
+        
+        # Enhanced metadata with cache performance
+        cache_stats = self.get_conditional_cache_stats()
+        metadata = self._create_generation_metadata(chunk_infos, total_duration, sample_rate, text, max_chars, 
+                                                  pause_ms, pause_scale, cache_stats)
+        
+        return audio_tensor, sample_rate, metadata
+    
+    def _create_generation_metadata(self, chunk_infos: List[ChunkInfo], total_duration: float, 
+                                  sample_rate: int, text: str, max_chars: int, pause_ms: int, 
+                                  pause_scale: float, cache_stats: Dict) -> Dict:
+        """Create comprehensive metadata for generation results"""
+        if chunk_infos:
+            content_type_dist = self.smart_chunker._get_content_type_distribution(chunk_infos)
+            avg_complexity = sum(c.complexity_score for c in chunk_infos) / len(chunk_infos)
+            avg_chunk_chars = sum(c.char_count for c in chunk_infos) / len(chunk_infos)
+            dialogue_chunks = sum(1 for c in chunk_infos if c.content_type == ContentType.DIALOGUE)
+            paragraph_breaks = sum(1 for c in chunk_infos if c.paragraph_break_after)
+        else:
+            content_type_dist = {}
+            avg_complexity = 0
+            avg_chunk_chars = 0
+            dialogue_chunks = 0
+            paragraph_breaks = 0
+        
+        return {
+            # Basic metrics
+            "chunk_count": len(chunk_infos),
+            "duration_sec": total_duration,
+            "sample_rate": sample_rate,
+            "text_length": len(text),
+            "max_chars_per_chunk": max_chars,
+            "pause_ms": pause_ms,
+            "pause_scale": pause_scale,
+            
+            # Smart chunking analysis
+            "avg_chunk_chars": round(avg_chunk_chars, 1),
+            "avg_complexity_score": round(avg_complexity, 2),
+            "content_type_distribution": content_type_dist,
+            "dialogue_chunk_count": dialogue_chunks,
+            "paragraph_breaks": paragraph_breaks,
+            "chunking_method": "smart_content_aware",
+            
+            # Advanced features
+            "text_sanitization": "advanced_unicode_normalization",
+            "parallel_processing": self.enable_parallel_processing,
+            "max_parallel_workers": self.max_parallel_workers if self.enable_parallel_processing else 1,
+            "quality_analysis": "comprehensive_audio_validation",
+            "stitching_method": "advanced_context_aware_transitions",
+            
+            # Performance metrics
+            "audio_chars_per_second": round(len(text) / max(total_duration, 0.1), 1),
+            "audio_efficiency_ratio": round(total_duration / max(len(text) * 0.08, 1), 2),
+            
+            # Conditional caching performance
+            "conditional_cache_hits": cache_stats['hits'],
+            "conditional_cache_misses": cache_stats['misses'],
+            "conditional_cache_hit_rate": round(cache_stats['hit_rate_percent'], 1),
+            "conditional_cache_total_requests": cache_stats['total_requests'],
+            "optimization_enabled": True,
+        }
