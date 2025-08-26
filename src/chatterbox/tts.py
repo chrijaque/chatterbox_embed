@@ -1436,8 +1436,8 @@ class ChatterboxTTS:
         self.advanced_stitcher = AdvancedStitcher()
         
         # Parallel processing settings
-        self.max_parallel_workers = 2  # Conservative for GPU memory
-        self.enable_parallel_processing = True
+        self.max_parallel_workers = 1  # Disabled for single-user processing
+        self.enable_parallel_processing = False  # Disabled as requested
         
         # Phase 1: Conditional Caching
         self._cached_conditionals = None
@@ -2054,9 +2054,18 @@ class ChatterboxTTS:
                 if pre_prepared_conditionals is not None:
                     original_conds = self.conds
                     self.conds = pre_prepared_conditionals
-                
-                try:
-                    # Generate audio tensor using adaptive parameters
+                    
+                    # Generate audio tensor using pre-prepared conditionals (skip conditional preparation)
+                    audio_tensor = self._generate_with_prepared_conditionals(
+                        text=chunk_info.text,
+                        temperature=adaptive_params["temperature"],
+                        cfg_weight=adaptive_params["cfg_weight"],
+                        repetition_penalty=adaptive_params["repetition_penalty"],
+                        min_p=adaptive_params["min_p"],
+                        top_p=adaptive_params["top_p"]
+                    )
+                else:
+                    # Generate audio tensor using adaptive parameters (normal flow)
                     audio_tensor = self.generate(
                         text=chunk_info.text,
                         voice_profile_path=voice_profile_path,
@@ -2067,10 +2076,10 @@ class ChatterboxTTS:
                         min_p=adaptive_params["min_p"],
                         top_p=adaptive_params["top_p"]
                     )
-                finally:
-                    # Restore original conditionals if we modified them
-                    if original_conds is not None:
-                        self.conds = original_conds
+                
+                # Restore original conditionals if we modified them
+                if original_conds is not None:
+                    self.conds = original_conds
                 
                 # Save to temporary file
                 temp_wav = tempfile.NamedTemporaryFile(suffix=f"_chunk_{chunk_info.id}_attempt_{attempt}.wav", delete=False)
