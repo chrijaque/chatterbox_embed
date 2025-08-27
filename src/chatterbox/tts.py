@@ -2766,22 +2766,41 @@ class ChatterboxTTS:
         """
         generation_start = time.time()
         
+        # TEMPORARILY DISABLED: Conditional caching to isolate voice issues
         # Phase 1: Prepare conditionals once for all chunks
-        logger.info(f"🎯 Preparing conditionals once for {len(chunk_infos)} chunks (saved voice + audio prompt)")
-        pre_prepared_conditionals = self._get_or_prepare_conditionals(
-            saved_voice_path=saved_voice_path,
-            audio_prompt_path=audio_prompt_path,
-            exaggeration=base_exaggeration
-        )
+        # logger.info(f"🎯 Preparing conditionals once for {len(chunk_infos)} chunks (saved voice + audio prompt)")
+        # pre_prepared_conditionals = self._get_or_prepare_conditionals(
+        #     saved_voice_path=saved_voice_path,
+        #     audio_prompt_path=audio_prompt_path,
+        #     exaggeration=base_exaggeration
+        # )
+        # 
+        # # Log cache performance
+        # cache_stats = self.get_conditional_cache_stats()
+        # logger.info(f"📊 Conditional cache stats: {cache_stats['hits']} hits, {cache_stats['misses']} misses ({cache_stats['hit_rate_percent']:.1f}% hit rate)")
+        # 
+        # # Use the same generation logic as the main method
+        # return self._generate_chunks_with_prepared_conditionals(
+        #     chunk_infos, pre_prepared_conditionals, generation_start
+        # )
         
-        # Log cache performance
-        cache_stats = self.get_conditional_cache_stats()
-        logger.info(f"📊 Conditional cache stats: {cache_stats['hits']} hits, {cache_stats['misses']} misses ({cache_stats['hit_rate_percent']:.1f}% hit rate)")
+        # Use original sequential generation logic
+        logger.info(f"🔄 Using original sequential processing for {len(chunk_infos)} chunks (saved voice + audio prompt)")
+        wav_paths = []
+        quality_scores = []
         
-        # Use the same generation logic as the main method
-        return self._generate_chunks_with_prepared_conditionals(
-            chunk_infos, pre_prepared_conditionals, generation_start
-        )
+        for chunk_info in chunk_infos:
+            wav_path, quality_score = self._generate_single_chunk_with_quality(
+                chunk_info, None, None  # No pre-prepared conditionals
+            )
+            wav_paths.append(wav_path)
+            quality_scores.append(quality_score)
+        
+        # Log comprehensive quality analysis
+        total_generation_time = time.time() - generation_start
+        self._log_quality_analysis(chunk_infos, quality_scores, total_generation_time)
+        
+        return wav_paths
     
     def generate_chunks_with_audio_prompt(self, chunk_infos: List[ChunkInfo], audio_prompt_path: str,
                                         base_temperature: float = 0.8, base_exaggeration: float = 0.5, 
@@ -2798,21 +2817,40 @@ class ChatterboxTTS:
         """
         generation_start = time.time()
         
+        # TEMPORARILY DISABLED: Conditional caching to isolate voice issues
         # Phase 1: Prepare conditionals once for all chunks
-        logger.info(f"🎯 Preparing conditionals once for {len(chunk_infos)} chunks (audio prompt)")
-        pre_prepared_conditionals = self._get_or_prepare_conditionals(
-            audio_prompt_path=audio_prompt_path,
-            exaggeration=base_exaggeration
-        )
+        # logger.info(f"🎯 Preparing conditionals once for {len(chunk_infos)} chunks (audio prompt)")
+        # pre_prepared_conditionals = self._get_or_prepare_conditionals(
+        #     audio_prompt_path=audio_prompt_path,
+        #     exaggeration=base_exaggeration
+        # )
+        # 
+        # # Log cache performance
+        # cache_stats = self.get_conditional_cache_stats()
+        # logger.info(f"📊 Conditional cache stats: {cache_stats['hits']} hits, {cache_stats['misses']} misses ({cache_stats['hit_rate_percent']:.1f}% hit rate)")
+        # 
+        # # Use the same generation logic as the main method
+        # return self._generate_chunks_with_prepared_conditionals(
+        #     chunk_infos, pre_prepared_conditionals, generation_start
+        # )
         
-        # Log cache performance
-        cache_stats = self.get_conditional_cache_stats()
-        logger.info(f"📊 Conditional cache stats: {cache_stats['hits']} hits, {cache_stats['misses']} misses ({cache_stats['hit_rate_percent']:.1f}% hit rate)")
+        # Use original sequential generation logic
+        logger.info(f"🔄 Using original sequential processing for {len(chunk_infos)} chunks (audio prompt)")
+        wav_paths = []
+        quality_scores = []
         
-        # Use the same generation logic as the main method
-        return self._generate_chunks_with_prepared_conditionals(
-            chunk_infos, pre_prepared_conditionals, generation_start
-        )
+        for chunk_info in chunk_infos:
+            wav_path, quality_score = self._generate_single_chunk_with_quality(
+                chunk_info, None, None  # No pre-prepared conditionals
+            )
+            wav_paths.append(wav_path)
+            quality_scores.append(quality_score)
+        
+        # Log comprehensive quality analysis
+        total_generation_time = time.time() - generation_start
+        self._log_quality_analysis(chunk_infos, quality_scores, total_generation_time)
+        
+        return wav_paths
     
     def _generate_chunks_with_prepared_conditionals(self, chunk_infos: List[ChunkInfo], 
                                                   pre_prepared_conditionals: Conditionals,
