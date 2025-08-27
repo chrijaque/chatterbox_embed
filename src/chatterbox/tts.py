@@ -1853,18 +1853,23 @@ class ChatterboxTTS:
         #     exaggeration=exaggeration
         # )
         
+        # TEMPORARILY DISABLED: All conditional preparation to isolate voice issues
         # Use original conditional preparation logic
-        if voice_profile_path:
-            # Use complete voice profile for most accurate TTS
-            self.prepare_conditionals_with_voice_profile(voice_profile_path, exaggeration=exaggeration)
-        elif saved_voice_path and audio_prompt_path:
-            # Use saved voice embedding with fresh prompt audio for prosody
-            self.prepare_conditionals_with_saved_voice(saved_voice_path, audio_prompt_path, exaggeration=exaggeration)
-        elif audio_prompt_path:
-            # Traditional method: compute everything fresh
-            self.prepare_conditionals(audio_prompt_path, exaggeration=exaggeration)
-        else:
-            assert self.conds is not None, "Please `prepare_conditionals` first, specify `audio_prompt_path`, or provide `voice_profile_path`, or provide both `saved_voice_path` and `audio_prompt_path`"
+        # if voice_profile_path:
+        #     # Use complete voice profile for most accurate TTS
+        #     self.prepare_conditionals_with_voice_profile(voice_profile_path, exaggeration=exaggeration)
+        # elif saved_voice_path and audio_prompt_path:
+        #     # Use saved voice embedding with fresh prompt audio for prosody
+        #     self.prepare_conditionals_with_saved_voice(saved_voice_path, audio_prompt_path, exaggeration=exaggeration)
+        # elif audio_prompt_path:
+        #     # Traditional method: compute everything fresh
+        #     self.prepare_conditionals(audio_prompt_path, exaggeration=exaggeration)
+        # else:
+        #     assert self.conds is not None, "Please `prepare_conditionals` first, specify `audio_prompt_path`, or provide `voice_profile_path`, or provide both `saved_voice_path` and `audio_prompt_path`"
+        
+        # Skip conditional preparation entirely - use existing conditionals
+        logger.info("🚫 TEMPORARILY DISABLED: Skipping conditional preparation")
+        assert self.conds is not None, "Conditionals must be prepared before calling generate() in disabled mode"
 
         # Norm and tokenize text
         text = punc_norm(text)
@@ -2382,6 +2387,10 @@ class ChatterboxTTS:
         chunk_infos = self.chunk_text(text, max_chars)
         logger.info(f"📦 Split into {len(chunk_infos)} intelligent chunks")
         
+        # TEMPORARILY DISABLED: Prepare conditionals once at the start
+        logger.info("🚫 TEMPORARILY DISABLED: Preparing conditionals once at the start")
+        self.prepare_conditionals_with_voice_profile(voice_profile_path, exaggeration=exaggeration)
+        
         # Apply global pace factor to advanced stitcher
         try:
             self.advanced_stitcher.global_pause_factor = max(0.5, min(2.0, float(pause_scale)))
@@ -2546,7 +2555,7 @@ class ChatterboxTTS:
     def generate_tts_story(self, text: str, voice_id: str, profile_base64: str = "", 
                            language: str = 'en', story_type: str = 'user', 
                            is_kids_voice: bool = False, metadata: Dict = None, pause_scale: float = 1.15,
-                           *, user_id: str = "", story_id: str = "", profile_path: str = "") -> Dict:
+                           *, user_id: str = "", story_id: str = "", profile_path: str = "", voice_name: str = "") -> Dict:
         """
         Generate TTS story with voice profile from base64.
         
@@ -2569,9 +2578,18 @@ class ChatterboxTTS:
         
         start_time = time.time()
         
+        # Extract voice_name from metadata if not provided directly
+        if not voice_name and metadata and isinstance(metadata, dict) and 'voice_name' in metadata:
+            voice_name = metadata['voice_name']
+        
+        # Fallback to voice_id if no voice_name provided
+        if not voice_name:
+            voice_name = voice_id
+        
         logger.info(f"📚 ChatterboxTTS.generate_tts_story called")
         logger.info(f"  - text length: {len(text)}")
         logger.info(f"  - voice_id: {voice_id}")
+        logger.info(f"  - voice_name: {voice_name}")
         logger.info(f"  - language: {language}")
         logger.info(f"  - story_type: {story_type}")
         logger.info(f"  - is_kids_voice: {is_kids_voice}")
@@ -2651,6 +2669,7 @@ class ChatterboxTTS:
                     content_type="audio/mpeg",
                     metadata={
                         "voice_id": voice_id,
+                        "voice_name": voice_name,
                         "language": language,
                         "story_type": final_story_type,
                         "text_length": len(text),
@@ -2696,7 +2715,7 @@ class ChatterboxTTS:
                     new_version = {
                         "id": version_id,
                         "voiceId": voice_id,
-                        "voiceName": voice_id,
+                        "voiceName": voice_name,
                         "audioUrl": firebase_url or "",
                         "url": firebase_url or "",
                         "createdAt": SERVER_TIMESTAMP,
@@ -2706,7 +2725,7 @@ class ChatterboxTTS:
                             "format": "mp3",
                             "size": len(mp3_bytes),
                             "duration": generation_metadata.get("duration_sec", 0) if 'generation_metadata' in locals() else 0,
-                            "voiceName": voice_id,
+                            "voiceName": voice_name,
                         },
                     }
                     # Update atomically: set status and push new version
