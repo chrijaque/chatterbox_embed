@@ -1535,15 +1535,16 @@ class ChatterboxTTS:
         elif audio_prompt_path:
             self.prepare_conditionals(audio_prompt_path, exaggeration)
         
-        # Cache the prepared conditionals
-        self._cached_conditionals = self.conds
+        # Cache the prepared conditionals (deep copy to avoid reference issues)
+        import copy
+        self._cached_conditionals = copy.deepcopy(self.conds)
         self._cached_voice_profile_path = voice_profile_path
         self._cached_saved_voice_path = saved_voice_path
         self._cached_audio_prompt_path = audio_prompt_path
         self._cached_exaggeration = exaggeration
         
         logger.info(f"✅ Conditionals prepared and cached successfully")
-        return self.conds
+        return self._cached_conditionals
     
     def _get_cache_key(self):
         """Get the current cache key for comparison"""
@@ -1896,6 +1897,7 @@ class ChatterboxTTS:
     def _generate_with_prepared_conditionals(
         self,
         text,
+        conditionals: Conditionals,
         exaggeration=None,
         repetition_penalty=1.2,
         min_p=0.05,
@@ -1904,18 +1906,21 @@ class ChatterboxTTS:
         temperature=0.8,
     ):
         """
-        Generate audio with already prepared self.conds, optionally overriding exaggeration per chunk.
+        Generate audio with provided conditionals, optionally overriding exaggeration per chunk.
         """
+        # Validate conditionals
+        if conditionals is None:
+            raise RuntimeError("Conditionals must be provided to _generate_with_prepared_conditionals.")
+        
+        # Create a deep copy of conditionals to avoid modifying the original
+        import copy
+        chunk_conditionals = copy.deepcopy(conditionals)
+        
         # Optional per-chunk emotion override without re-prepping conditionals
         # This allows AdaptiveParameterManager to vary 'exaggeration' per chunk.
-        if self.conds is None:
-            # Prepare conditionals if not already set (should be set by caller)
-            raise RuntimeError("Conditionals must be prepared before calling _generate_with_prepared_conditionals.")
-        # Optional per-chunk emotion override without re-prepping conditionals
-        # This allows AdaptiveParameterManager to vary 'exaggeration' per chunk.
-        if exaggeration is not None and hasattr(self.conds, "t3") and hasattr(self.conds.t3, "emotion_adv"):
+        if exaggeration is not None and hasattr(chunk_conditionals, "t3") and hasattr(chunk_conditionals.t3, "emotion_adv"):
             try:
-                self.conds.t3.emotion_adv = (torch.ones(1, 1, 1, device=self.device) * float(exaggeration))
+                chunk_conditionals.t3.emotion_adv = (torch.ones(1, 1, 1, device=self.device) * float(exaggeration))
             except Exception as e:
                 logger.warning(f"Could not set per-chunk emotion_adv: {e}")
 
@@ -2116,15 +2121,12 @@ class ChatterboxTTS:
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
                 
-                # Store original conditionals if we have pre-prepared ones
-                original_conds = None
                 if pre_prepared_conditionals is not None:
-                    original_conds = self.conds
-                    self.conds = pre_prepared_conditionals
-                    
                     # Generate audio tensor using pre-prepared conditionals (skip conditional preparation)
                     audio_tensor = self._generate_with_prepared_conditionals(
                         text=chunk_info.text,
+                        conditionals=pre_prepared_conditionals,
+                        exaggeration=adaptive_params["exaggeration"],
                         temperature=adaptive_params["temperature"],
                         cfg_weight=adaptive_params["cfg_weight"],
                         repetition_penalty=adaptive_params["repetition_penalty"],
@@ -2143,10 +2145,6 @@ class ChatterboxTTS:
                         min_p=adaptive_params["min_p"],
                         top_p=adaptive_params["top_p"]
                     )
-                
-                # Restore original conditionals if we modified them
-                if original_conds is not None:
-                    self.conds = original_conds
                 
                 # Save to temporary file
                 temp_wav = tempfile.NamedTemporaryFile(suffix=f"_chunk_{chunk_info.id}_attempt_{attempt}.wav", delete=False)
