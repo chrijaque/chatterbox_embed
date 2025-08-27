@@ -1893,6 +1893,73 @@ class ChatterboxTTS:
             watermarked_wav = self.watermarker.apply_watermark(wav, sample_rate=self.sr)
         return torch.from_numpy(watermarked_wav).unsqueeze(0)
 
+    def _generate_with_prepared_conditionals(
+        self,
+        text,
+        exaggeration=None,
+        repetition_penalty=1.2,
+        min_p=0.05,
+        top_p=1.0,
+        cfg_weight=0.5,
+        temperature=0.8,
+    ):
+        """
+        Generate audio with already prepared self.conds, optionally overriding exaggeration per chunk.
+        """
+        # Optional per-chunk emotion override without re-prepping conditionals
+        # This allows AdaptiveParameterManager to vary 'exaggeration' per chunk.
+        if self.conds is None:
+            # Prepare conditionals if not already set (should be set by caller)
+            raise RuntimeError("Conditionals must be prepared before calling _generate_with_prepared_conditionals.")
+        # Optional per-chunk emotion override without re-prepping conditionals
+        # This allows AdaptiveParameterManager to vary 'exaggeration' per chunk.
+        if exaggeration is not None and hasattr(self.conds, "t3") and hasattr(self.conds.t3, "emotion_adv"):
+            try:
+                self.conds.t3.emotion_adv = (torch.ones(1, 1, 1, device=self.device) * float(exaggeration))
+            except Exception as e:
+                logger.warning(f"Could not set per-chunk emotion_adv: {e}")
+
+        # Norm and tokenize text
+        text = punc_norm(text)
+        text_tokens = self.tokenizer.text_to_tokens(text).to(self.device)
+
+        if cfg_weight > 0.0:
+            text_tokens = torch.cat([text_tokens, text_tokens], dim=0)  # Need two seqs for CFG
+
+        sot = self.t3.hp.start_text_token
+        eot = self.t3.hp.stop_text_token
+        text_tokens = F.pad(text_tokens, (1, 0), value=sot)
+        text_tokens = F.pad(text_tokens, (0, 1), value=eot)
+
+        with torch.inference_mode():
+            speech_tokens = self.t3.inference(
+                t3_cond=self.conds.t3,
+                text_tokens=text_tokens,
+                max_new_tokens=1000,  # TODO: use the value in config
+                temperature=temperature,
+                cfg_weight=cfg_weight,
+                repetition_penalty=repetition_penalty,
+                min_p=min_p,
+                top_p=top_p,
+            )
+            # Extract only the conditional batch.
+            speech_tokens = speech_tokens[0]
+
+            # TODO: output becomes 1D
+            speech_tokens = drop_invalid_tokens(speech_tokens)
+            
+            speech_tokens = speech_tokens[speech_tokens < 6561]
+
+            speech_tokens = speech_tokens.to(self.device)
+
+            wav, _ = self.s3gen.inference(
+                speech_tokens=speech_tokens,
+                ref_dict=self.conds.gen,
+            )
+            wav = wav.squeeze(0).detach().cpu().numpy()
+            watermarked_wav = self.watermarker.apply_watermark(wav, sample_rate=self.sr)
+        return torch.from_numpy(watermarked_wav).unsqueeze(0)
+
     def chunk_text(self, text: str, max_chars: int = 500) -> List[ChunkInfo]:
         """
         Smart text chunking with advanced sanitization and content awareness.
