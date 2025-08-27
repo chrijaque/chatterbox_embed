@@ -1845,13 +1845,26 @@ class ChatterboxTTS:
         cfg_weight=0.5,
         temperature=0.8,
     ):
-        # Phase 1: Use conditional caching to avoid redundant preparation
-        self.conds = self._get_or_prepare_conditionals(
-            voice_profile_path=voice_profile_path,
-            saved_voice_path=saved_voice_path,
-            audio_prompt_path=audio_prompt_path,
-            exaggeration=exaggeration
-        )
+        # TEMPORARILY DISABLED: Conditional caching to isolate voice issues
+        # self.conds = self._get_or_prepare_conditionals(
+        #     voice_profile_path=voice_profile_path,
+        #     saved_voice_path=saved_voice_path,
+        #     audio_prompt_path=audio_prompt_path,
+        #     exaggeration=exaggeration
+        # )
+        
+        # Use original conditional preparation logic
+        if voice_profile_path:
+            # Use complete voice profile for most accurate TTS
+            self.prepare_conditionals_with_voice_profile(voice_profile_path, exaggeration=exaggeration)
+        elif saved_voice_path and audio_prompt_path:
+            # Use saved voice embedding with fresh prompt audio for prosody
+            self.prepare_conditionals_with_saved_voice(saved_voice_path, audio_prompt_path, exaggeration=exaggeration)
+        elif audio_prompt_path:
+            # Traditional method: compute everything fresh
+            self.prepare_conditionals(audio_prompt_path, exaggeration=exaggeration)
+        else:
+            assert self.conds is not None, "Please `prepare_conditionals` first, specify `audio_prompt_path`, or provide `voice_profile_path`, or provide both `saved_voice_path` and `audio_prompt_path`"
 
         # Norm and tokenize text
         text = punc_norm(text)
@@ -2219,21 +2232,40 @@ class ChatterboxTTS:
         """
         generation_start = time.time()
         
+        # TEMPORARILY DISABLED: Conditional caching to isolate voice issues
         # Phase 1: Prepare conditionals once for all chunks (major optimization)
-        logger.info(f"🎯 Preparing conditionals once for {len(chunk_infos)} chunks")
-        pre_prepared_conditionals = self._get_or_prepare_conditionals(
-            voice_profile_path=voice_profile_path,
-            exaggeration=base_exaggeration
-        )
+        # logger.info(f"🎯 Preparing conditionals once for {len(chunk_infos)} chunks")
+        # pre_prepared_conditionals = self._get_or_prepare_conditionals(
+        #     voice_profile_path=voice_profile_path,
+        #     exaggeration=base_exaggeration
+        # )
+        # 
+        # # Log cache performance
+        # cache_stats = self.get_conditional_cache_stats()
+        # logger.info(f"📊 Conditional cache stats: {cache_stats['hits']} hits, {cache_stats['misses']} misses ({cache_stats['hit_rate_percent']:.1f}% hit rate)")
+        # 
+        # # Use the centralized generation logic
+        # return self._generate_chunks_with_prepared_conditionals(
+        #     chunk_infos, pre_prepared_conditionals, generation_start
+        # )
         
-        # Log cache performance
-        cache_stats = self.get_conditional_cache_stats()
-        logger.info(f"📊 Conditional cache stats: {cache_stats['hits']} hits, {cache_stats['misses']} misses ({cache_stats['hit_rate_percent']:.1f}% hit rate)")
+        # Use original sequential generation logic
+        logger.info(f"🔄 Using original sequential processing for {len(chunk_infos)} chunks")
+        wav_paths = []
+        quality_scores = []
         
-        # Use the centralized generation logic
-        return self._generate_chunks_with_prepared_conditionals(
-            chunk_infos, pre_prepared_conditionals, generation_start
-        )
+        for chunk_info in chunk_infos:
+            wav_path, quality_score = self._generate_single_chunk_with_quality(
+                chunk_info, voice_profile_path, None  # No pre-prepared conditionals
+            )
+            wav_paths.append(wav_path)
+            quality_scores.append(quality_score)
+        
+        # Log comprehensive quality analysis
+        total_generation_time = time.time() - generation_start
+        self._log_quality_analysis(chunk_infos, quality_scores, total_generation_time)
+        
+        return wav_paths
     
     def _log_quality_analysis(self, chunk_infos: List[ChunkInfo], quality_scores: List[QualityScore], total_time: float):
         """Log comprehensive quality analysis results"""
