@@ -355,36 +355,36 @@ class AdaptiveParameterManager:
     # Base parameter profiles for different content types
     CONTENT_PROFILES = {
         ContentType.DIALOGUE: {
-            "temperature": 0.7,         # Lower for more consistent speech patterns
-            "exaggeration": 0.75,        # Higher for emotional expression
-            "cfg_weight": 0.6,          # Higher for clarity in speech
-            "repetition_penalty": 1.3,  # Higher to avoid repetitive dialogue
+            "temperature": 0.7,          # Stable within 0.65–0.75
+            "exaggeration": 0.6,         # Modest to preserve timbre
+            "cfg_weight": 0.6,           # Slightly higher for adherence to conditioning
+            "repetition_penalty": 1.25,  # Within 1.1–1.3
             "min_p": 0.05,
-            "top_p": 0.95,              # Slightly lower for more focused generation
+            "top_p": 0.92,               # 0.9–0.95
         },
         ContentType.NARRATIVE: {
-            "temperature": 0.8,         # Balanced for natural storytelling
-            "exaggeration": 0.65,        # Neutral for story flow
-            "cfg_weight": 0.5,          # Balanced
-            "repetition_penalty": 1.2,  # Standard
+            "temperature": 0.72,         # Stable within 0.65–0.75
+            "exaggeration": 0.5,         # Modest
+            "cfg_weight": 0.6,           # Slightly higher adherence
+            "repetition_penalty": 1.2,   # Stable
             "min_p": 0.05,
-            "top_p": 1.0,               # Full range for natural variation
+            "top_p": 0.92,
         },
         ContentType.DESCRIPTIVE: {
-            "temperature": 0.9,         # Higher for natural variation in descriptions
-            "exaggeration": 0.55,        # Lower for calm, descriptive delivery
-            "cfg_weight": 0.4,          # Lower for more creative interpretation
-            "repetition_penalty": 1.1,  # Lower - descriptions can have repetitive structure
-            "min_p": 0.04,              # Slightly lower for more variety
-            "top_p": 1.0,
+            "temperature": 0.7,          # More stable
+            "exaggeration": 0.5,         # Modest
+            "cfg_weight": 0.6,           # Increase adherence
+            "repetition_penalty": 1.2,   # Prevent loops without overpenalizing
+            "min_p": 0.05,
+            "top_p": 0.92,
         },
         ContentType.TRANSITION: {
-            "temperature": 0.75,        # Moderate for smooth transitions
-            "exaggeration": 0.5,        # Lower for transitional calm
-            "cfg_weight": 0.55,         # Slightly higher for clarity
-            "repetition_penalty": 1.25, # Moderate
+            "temperature": 0.7,          # Stable
+            "exaggeration": 0.45,        # Slightly calmer
+            "cfg_weight": 0.6,           # Adherence
+            "repetition_penalty": 1.25,
             "min_p": 0.05,
-            "top_p": 0.98,
+            "top_p": 0.92,
         }
     }
     
