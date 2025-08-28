@@ -1853,23 +1853,21 @@ class ChatterboxTTS:
         #     exaggeration=exaggeration
         # )
         
-        # TEMPORARILY DISABLED: All conditional preparation to isolate voice issues
-        # Use original conditional preparation logic
-        # if voice_profile_path:
-        #     # Use complete voice profile for most accurate TTS
-        #     self.prepare_conditionals_with_voice_profile(voice_profile_path, exaggeration=exaggeration)
-        # elif saved_voice_path and audio_prompt_path:
-        #     # Use saved voice embedding with fresh prompt audio for prosody
-        #     self.prepare_conditionals_with_saved_voice(saved_voice_path, audio_prompt_path, exaggeration=exaggeration)
-        # elif audio_prompt_path:
-        #     # Traditional method: compute everything fresh
-        #     self.prepare_conditionals(audio_prompt_path, exaggeration=exaggeration)
-        # else:
-        #     assert self.conds is not None, "Please `prepare_conditionals` first, specify `audio_prompt_path`, or provide `voice_profile_path`, or provide both `saved_voice_path` and `audio_prompt_path`"
+        # RE-ENABLED: Conditional preparation is essential for TTS generation
+        # Without conditionals, T3 generates random tokens (causing humming/moaning)
+        if voice_profile_path:
+            # Use complete voice profile for most accurate TTS
+            self.prepare_conditionals_with_voice_profile(voice_profile_path, exaggeration=exaggeration)
+        elif saved_voice_path and audio_prompt_path:
+            # Use saved voice embedding with fresh prompt audio for prosody
+            self.prepare_conditionals_with_saved_voice(saved_voice_path, audio_prompt_path, exaggeration=exaggeration)
+        elif audio_prompt_path:
+            # Traditional method: compute everything fresh
+            self.prepare_conditionals(audio_prompt_path, exaggeration=exaggeration)
+        else:
+            assert self.conds is not None, "Please `prepare_conditionals` first, specify `audio_prompt_path`, or provide `voice_profile_path`, or provide both `saved_voice_path` and `audio_prompt_path`"
         
-        # Skip conditional preparation entirely - use existing conditionals
-        logger.info("🚫 TEMPORARILY DISABLED: Skipping conditional preparation")
-        assert self.conds is not None, "Conditionals must be prepared before calling generate() in disabled mode"
+        logger.info("✅ Conditionals prepared for TTS generation")
 
         # Norm and tokenize text
         text = punc_norm(text)
@@ -1956,7 +1954,7 @@ class ChatterboxTTS:
 
         with torch.inference_mode():
             speech_tokens = self.t3.inference(
-                t3_cond=self.conds.t3,
+                t3_cond=chunk_conditionals.t3,
                 text_tokens=text_tokens,
                 max_new_tokens=1000,  # TODO: use the value in config
                 temperature=temperature,
@@ -1977,7 +1975,7 @@ class ChatterboxTTS:
 
             wav, _ = self.s3gen.inference(
                 speech_tokens=speech_tokens,
-                ref_dict=self.conds.gen,
+                ref_dict=chunk_conditionals.gen,
             )
             wav = wav.squeeze(0).detach().cpu().numpy()
             watermarked_wav = self.watermarker.apply_watermark(wav, sample_rate=self.sr)
@@ -2139,30 +2137,18 @@ class ChatterboxTTS:
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
                 
-                if pre_prepared_conditionals is not None:
-                    # Generate audio tensor using pre-prepared conditionals (skip conditional preparation)
-                    audio_tensor = self._generate_with_prepared_conditionals(
-                        text=chunk_info.text,
-                        conditionals=pre_prepared_conditionals,
-                        exaggeration=adaptive_params["exaggeration"],
-                        temperature=adaptive_params["temperature"],
-                        cfg_weight=adaptive_params["cfg_weight"],
-                        repetition_penalty=adaptive_params["repetition_penalty"],
-                        min_p=adaptive_params["min_p"],
-                        top_p=adaptive_params["top_p"]
-                    )
-                else:
-                    # Generate audio tensor using adaptive parameters (normal flow)
-                    audio_tensor = self.generate(
-                        text=chunk_info.text,
-                        voice_profile_path=voice_profile_path,
-                        temperature=adaptive_params["temperature"],
-                        exaggeration=adaptive_params["exaggeration"],
-                        cfg_weight=adaptive_params["cfg_weight"],
-                        repetition_penalty=adaptive_params["repetition_penalty"],
-                        min_p=adaptive_params["min_p"],
-                        top_p=adaptive_params["top_p"]
-                    )
+                # TEMPORARILY DISABLED: Always use normal flow (no conditional caching)
+                # Generate audio tensor using adaptive parameters (normal flow)
+                audio_tensor = self.generate(
+                    text=chunk_info.text,
+                    voice_profile_path=voice_profile_path,
+                    temperature=adaptive_params["temperature"],
+                    exaggeration=adaptive_params["exaggeration"],
+                    cfg_weight=adaptive_params["cfg_weight"],
+                    repetition_penalty=adaptive_params["repetition_penalty"],
+                    min_p=adaptive_params["min_p"],
+                    top_p=adaptive_params["top_p"]
+                )
                 
                 # Save to temporary file
                 temp_wav = tempfile.NamedTemporaryFile(suffix=f"_chunk_{chunk_info.id}_attempt_{attempt}.wav", delete=False)
@@ -2387,8 +2373,8 @@ class ChatterboxTTS:
         chunk_infos = self.chunk_text(text, max_chars)
         logger.info(f"📦 Split into {len(chunk_infos)} intelligent chunks")
         
-        # TEMPORARILY DISABLED: Prepare conditionals once at the start
-        logger.info("🚫 TEMPORARILY DISABLED: Preparing conditionals once at the start")
+        # RE-ENABLED: Prepare conditionals once at the start for efficiency
+        logger.info("✅ Preparing conditionals once at the start")
         self.prepare_conditionals_with_voice_profile(voice_profile_path, exaggeration=exaggeration)
         
         # Apply global pace factor to advanced stitcher
