@@ -468,6 +468,13 @@ class AdaptiveParameterManager:
                 params["top_p"] = min(params.get("top_p", 1.0), self.opener_top_p)
                 params["min_p"] = max(params.get("min_p", 0.05), self.opener_min_p)
                 params["repetition_penalty"] = max(params.get("repetition_penalty", 1.2), self.opener_repetition_penalty)
+        else:
+            # Gentle easing for the second chunk to avoid sudden jump after opener
+            # Chunk IDs are sequential; id==1 typically indicates the chunk after opener.
+            if chunk_info.id == 1:
+                params["temperature"] = min(params.get("temperature", 0.8), max(0.58, self.opener_temperature + 0.05))
+                params["exaggeration"] = min(params.get("exaggeration", 0.5), self.first_chunk_exaggeration_cap - 0.1)
+                params["cfg_weight"] = max(params.get("cfg_weight", 0.5), max(self.first_chunk_min_cfg_weight, self.opener_cfg_weight - 0.02))
         
         if chunk_info.is_last_chunk:
             params["exaggeration"] *= 0.9      # Slightly calmer ending
@@ -1058,8 +1065,8 @@ class AdvancedStitcher:
         }
         
         # Fade settings
-        self.fade_in_duration = 50   # ms
-        self.fade_out_duration = 50  # ms
+        self.fade_in_duration = 90   # ms
+        self.fade_out_duration = 70  # ms
         self.crossfade_duration = 25 # ms for overlapping chunks
 
         # Global pause scaling to control narration pace (1.0 = baseline)
@@ -1073,7 +1080,7 @@ class AdvancedStitcher:
         self.fade_in_first_chunk_ms = 130
 
         # Add an extra pause after the first chunk to let the opener land (ms)
-        self.extra_first_pause_ms = 100
+        self.extra_first_pause_ms = 60
         self.loudness_target_lufs = -19.4   # Integrated loudness target (LUFS)
         self.loudness_target_tp = -1.0      # True peak target (dBTP)
         self.loudness_target_lra = 11.0     # Target Loudness Range (LU)
