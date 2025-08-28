@@ -407,8 +407,12 @@ class AdaptiveParameterManager:
         self.enable_intro_boost = True
         self.intro_exaggeration_boost = 0.2   # +0.2 on first chunk
         self.intro_temperature_boost = 0.05   # +0.05 on first chunk
-        self.intro_cfg_weight_factor = 0.9    # reduce CFG a bit for more expression
+        self.intro_cfg_weight_factor = 0.9    # reduce CFG a bit for more expression (not below min)
         self.intro_boost_max_words = 35       # apply full boost only if first chunk is short
+        # New safety guards for first-chunk stability
+        self.intro_min_words_for_boost = 12   # disable boost for extremely short openers
+        self.first_chunk_exaggeration_cap = 0.7
+        self.first_chunk_min_cfg_weight = 0.5
     
     def get_adaptive_parameters(self, chunk_info: ChunkInfo) -> Dict:
         """Get optimized parameters for a specific chunk"""
@@ -431,13 +435,21 @@ class AdaptiveParameterManager:
             # Original behavior favored stability; instead, apply a gentle intro boost for engagement.
             # For long first chunks, avoid raising temperature to prevent over-energizing long passages.
             if self.enable_intro_boost:
-                if chunk_info.word_count <= self.intro_boost_max_words:
+                # No boost for extremely short openers
+                if chunk_info.word_count < self.intro_min_words_for_boost:
+                    params["temperature"] = params.get("temperature", 0.8)
+                    params["exaggeration"] = min(params.get("exaggeration", 0.5), self.first_chunk_exaggeration_cap)
+                    params["cfg_weight"] = max(self.first_chunk_min_cfg_weight, params.get("cfg_weight", 0.5))
+                elif chunk_info.word_count <= self.intro_boost_max_words:
                     params["temperature"] = max(0.5, min(1.2, params.get("temperature", 0.8) + self.intro_temperature_boost))
-                    params["exaggeration"] = max(0.1, min(1.0, params.get("exaggeration", 0.5) + self.intro_exaggeration_boost))
-                    params["cfg_weight"] = max(0.2, min(0.8, params.get("cfg_weight", 0.5) * self.intro_cfg_weight_factor))
+                    params["exaggeration"] = max(0.1, min(self.first_chunk_exaggeration_cap, params.get("exaggeration", 0.5) + self.intro_exaggeration_boost))
+                    # Do not allow CFG to fall below the minimum for stability
+                    boosted_cfg = params.get("cfg_weight", 0.5) * self.intro_cfg_weight_factor
+                    params["cfg_weight"] = max(self.first_chunk_min_cfg_weight, boosted_cfg)
                 else:
                     # Long first chunk: keep temperature unchanged, only a light expressiveness bump
-                    params["exaggeration"] = max(0.1, min(1.0, params.get("exaggeration", 0.5) + min(0.1, self.intro_exaggeration_boost * 0.5)))
+                    params["exaggeration"] = max(0.1, min(self.first_chunk_exaggeration_cap, params.get("exaggeration", 0.5) + min(0.1, self.intro_exaggeration_boost * 0.5)))
+                    params["cfg_weight"] = max(self.first_chunk_min_cfg_weight, params.get("cfg_weight", 0.5))
         
         if chunk_info.is_last_chunk:
             params["exaggeration"] *= 0.9      # Slightly calmer ending
@@ -1040,7 +1052,7 @@ class AdvancedStitcher:
         # Disable per-chunk normalization for performance (final pass only if enabled)
         self.enable_per_chunk_normalization = False
         # Gentle fade-in for the very first chunk to avoid abrupt start (ms)
-        self.fade_in_first_chunk_ms = 25
+        self.fade_in_first_chunk_ms = 90
 
         # Add an extra pause after the first chunk to let the opener land (ms)
         self.extra_first_pause_ms = 50
@@ -2030,20 +2042,24 @@ class ChatterboxTTS:
         chunk_infos: List[ChunkInfo]
         if 0 <= first_dot_idx <= 200:  # bound to avoid overly long first sentence
             lead = sanitized_text[: first_dot_idx + 1].strip()
-            rest = sanitized_text[first_dot_idx + 1 :].lstrip()
-            lead_chunk = self.smart_chunker._create_chunk_info(0, lead, True, False)
-            rest_chunks = self.smart_chunker.smart_chunk(rest, target_chars, max_chars)
-            # Re-index rest chunks and flags
-            for i, ch in enumerate(rest_chunks):
-                ch.id = i + 1
-                if i == len(rest_chunks) - 1:
-                    ch.is_last_chunk = True
-            # First chunk cannot know if there's a paragraph break; keep default False
-            if rest_chunks:
-                lead_chunk.is_last_chunk = False
+            # Skip special lead split if the opener is extremely short (<= 12 words)
+            if len(lead.split()) <= 12:
+                chunk_infos = self.smart_chunker.smart_chunk(sanitized_text, target_chars, max_chars)
             else:
-                lead_chunk.is_last_chunk = True
-            chunk_infos = [lead_chunk] + rest_chunks
+                rest = sanitized_text[first_dot_idx + 1 :].lstrip()
+                lead_chunk = self.smart_chunker._create_chunk_info(0, lead, True, False)
+                rest_chunks = self.smart_chunker.smart_chunk(rest, target_chars, max_chars)
+                # Re-index rest chunks and flags
+                for i, ch in enumerate(rest_chunks):
+                    ch.id = i + 1
+                    if i == len(rest_chunks) - 1:
+                        ch.is_last_chunk = True
+                # First chunk cannot know if there's a paragraph break; keep default False
+                if rest_chunks:
+                    lead_chunk.is_last_chunk = False
+                else:
+                    lead_chunk.is_last_chunk = True
+                chunk_infos = [lead_chunk] + rest_chunks
         else:
             chunk_infos = self.smart_chunker.smart_chunk(sanitized_text, target_chars, max_chars)
         
