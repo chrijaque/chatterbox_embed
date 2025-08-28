@@ -363,20 +363,20 @@ class AdaptiveParameterManager:
             "top_p": 0.92,               # 0.9–0.95
         },
         ContentType.NARRATIVE: {
-            "temperature": 0.72,         # Stable within 0.65–0.75
-            "exaggeration": 0.5,         # Modest
-            "cfg_weight": 0.6,           # Slightly higher adherence
-            "repetition_penalty": 1.2,   # Stable
+            "temperature": 0.65,         # More monotone
+            "exaggeration": 0.4,         # Reduce expressiveness
+            "cfg_weight": 0.65,          # Stronger adherence
+            "repetition_penalty": 1.25,
             "min_p": 0.05,
-            "top_p": 0.92,
+            "top_p": 0.9,
         },
         ContentType.DESCRIPTIVE: {
-            "temperature": 0.7,          # More stable
-            "exaggeration": 0.5,         # Modest
-            "cfg_weight": 0.6,           # Increase adherence
-            "repetition_penalty": 1.2,   # Prevent loops without overpenalizing
+            "temperature": 0.65,         # More monotone
+            "exaggeration": 0.35,        # Calmer delivery
+            "cfg_weight": 0.65,          # Stronger adherence
+            "repetition_penalty": 1.25,
             "min_p": 0.05,
-            "top_p": 0.92,
+            "top_p": 0.9,
         },
         ContentType.TRANSITION: {
             "temperature": 0.7,          # Stable
@@ -413,6 +413,15 @@ class AdaptiveParameterManager:
         self.intro_min_words_for_boost = 12   # disable boost for extremely short openers
         self.first_chunk_exaggeration_cap = 0.7
         self.first_chunk_min_cfg_weight = 0.5
+
+        # Opener preset (stability over creativity)
+        self.enable_opener_preset = True
+        self.opener_temperature = 0.62
+        self.opener_cfg_weight = 0.7
+        self.opener_exaggeration = 0.35
+        self.opener_top_p = 0.9
+        self.opener_min_p = 0.05
+        self.opener_repetition_penalty = 1.18
     
     def get_adaptive_parameters(self, chunk_info: ChunkInfo) -> Dict:
         """Get optimized parameters for a specific chunk"""
@@ -450,6 +459,15 @@ class AdaptiveParameterManager:
                     # Long first chunk: keep temperature unchanged, only a light expressiveness bump
                     params["exaggeration"] = max(0.1, min(self.first_chunk_exaggeration_cap, params.get("exaggeration", 0.5) + min(0.1, self.intro_exaggeration_boost * 0.5)))
                     params["cfg_weight"] = max(self.first_chunk_min_cfg_weight, params.get("cfg_weight", 0.5))
+
+            # Apply opener preset to further calm the opener
+            if self.enable_opener_preset:
+                params["temperature"] = min(params.get("temperature", 0.8), self.opener_temperature)
+                params["cfg_weight"] = max(params.get("cfg_weight", 0.5), self.opener_cfg_weight)
+                params["exaggeration"] = min(params.get("exaggeration", 0.5), self.opener_exaggeration)
+                params["top_p"] = min(params.get("top_p", 1.0), self.opener_top_p)
+                params["min_p"] = max(params.get("min_p", 0.05), self.opener_min_p)
+                params["repetition_penalty"] = max(params.get("repetition_penalty", 1.2), self.opener_repetition_penalty)
         
         if chunk_info.is_last_chunk:
             params["exaggeration"] *= 0.9      # Slightly calmer ending
@@ -1052,10 +1070,10 @@ class AdvancedStitcher:
         # Disable per-chunk normalization for performance (final pass only if enabled)
         self.enable_per_chunk_normalization = False
         # Gentle fade-in for the very first chunk to avoid abrupt start (ms)
-        self.fade_in_first_chunk_ms = 90
+        self.fade_in_first_chunk_ms = 130
 
         # Add an extra pause after the first chunk to let the opener land (ms)
-        self.extra_first_pause_ms = 50
+        self.extra_first_pause_ms = 100
         self.loudness_target_lufs = -19.4   # Integrated loudness target (LUFS)
         self.loudness_target_tp = -1.0      # True peak target (dBTP)
         self.loudness_target_lra = 11.0     # Target Loudness Range (LU)
@@ -1064,46 +1082,22 @@ class AdvancedStitcher:
     def calculate_smart_pause(self, chunk_info: ChunkInfo, next_chunk_info: Optional[ChunkInfo] = None) -> int:
         """Calculate optimal pause duration based on context"""
         
-        # Check for story break first (highest priority)
-        if chunk_info.has_story_break:
-            base_pause = self.punctuation_pauses.get('<STORY_BREAK>', 800)
-            logger.info(f"🎭 Story break detected - applying {base_pause}ms pause")
+        # Consistent baseline: only paragraph/story breaks get extended pauses.
+        # All other punctuation use a short, consistent pause.
+        if chunk_info.has_story_break or chunk_info.paragraph_break_after:
+            base_pause = 600  # clear separation
         else:
-            # Get base pause from ending punctuation
-            ending_punct = chunk_info.ending_punctuation
-            base_pause = self.punctuation_pauses.get(ending_punct, 200)
-        
-        # Apply content type modifier
-        content_modifier = self.content_type_modifiers.get(chunk_info.content_type, 1.0)
-        pause_duration = base_pause * content_modifier
-        
-        # Adjust based on paragraph breaks
-        if chunk_info.paragraph_break_after:
-            pause_duration *= 1.4  # Longer pause between paragraphs
-        
-        # Adjust based on content type transitions
-        if next_chunk_info and chunk_info.content_type != next_chunk_info.content_type:
-            # Transitioning between content types needs extra pause
-            pause_duration *= 1.2
-            
-            # Special case: dialogue to non-dialogue needs more pause
-            if chunk_info.content_type == ContentType.DIALOGUE:
-                pause_duration *= 1.1
-        
-        # Adjust based on complexity
-        if chunk_info.complexity_score > 7:
-            pause_duration *= 1.1  # Longer pause after complex content
-        
-        # Apply global pace factor
-        pause_duration *= max(0.5, min(2.0, self.global_pause_factor))
+            base_pause = 250  # consistent short pause for sentence ends/commas/etc.
 
-        # Add a bit more air after the very first chunk
+        # Apply global pace factor
+        pause_duration = base_pause * max(0.5, min(2.0, self.global_pause_factor))
+
+        # Gentle extra air after the first chunk only
         if chunk_info.is_first_chunk:
             pause_duration += max(0, int(self.extra_first_pause_ms))
 
-        # Ensure reasonable bounds
-        pause_duration = max(100, min(1200, pause_duration))
-        
+        # Clamp to reasonable bounds
+        pause_duration = max(120, min(900, pause_duration))
         return int(pause_duration)
     
     def apply_smart_fades(self, segment, is_first: bool, is_last: bool, 
@@ -2036,25 +2030,24 @@ class ChatterboxTTS:
         # Step 3: Smart chunking with optional lead-sentence split
         target_chars = int(max_chars * 0.8)  # Target 80% of max for better quality
 
-        # Heuristic: make the very first chunk end at the first '.' if it appears early
-        # to create a punchy opener. If not found soon, fall back to normal chunking.
+        # Opener heuristic: ensure the first chunk is not a micro-opener. Prefer at least 2 sentences or >=180 chars.
         first_dot_idx = sanitized_text.find('.')
         chunk_infos: List[ChunkInfo]
-        if 0 <= first_dot_idx <= 200:  # bound to avoid overly long first sentence
+        if 0 <= first_dot_idx <= 200:
             lead = sanitized_text[: first_dot_idx + 1].strip()
-            # Skip special lead split if the opener is extremely short (<= 12 words)
-            if len(lead.split()) <= 12:
+            # Count sentences in the opener candidate
+            sentence_count = sum(1 for c in lead if c in '.!?')
+            if len(lead) < 180 or sentence_count < 2:
+                # Do not split early; let smart chunking form a fuller opener
                 chunk_infos = self.smart_chunker.smart_chunk(sanitized_text, target_chars, max_chars)
             else:
                 rest = sanitized_text[first_dot_idx + 1 :].lstrip()
                 lead_chunk = self.smart_chunker._create_chunk_info(0, lead, True, False)
                 rest_chunks = self.smart_chunker.smart_chunk(rest, target_chars, max_chars)
-                # Re-index rest chunks and flags
                 for i, ch in enumerate(rest_chunks):
                     ch.id = i + 1
                     if i == len(rest_chunks) - 1:
                         ch.is_last_chunk = True
-                # First chunk cannot know if there's a paragraph break; keep default False
                 if rest_chunks:
                     lead_chunk.is_last_chunk = False
                 else:
