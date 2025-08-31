@@ -355,36 +355,36 @@ class AdaptiveParameterManager:
     # Base parameter profiles for different content types
     CONTENT_PROFILES = {
         ContentType.DIALOGUE: {
-            "temperature": 0.7,          # Stable within 0.65–0.75
-            "exaggeration": 0.6,         # Modest to preserve timbre
-            "cfg_weight": 0.6,           # Slightly higher for adherence to conditioning
-            "repetition_penalty": 1.25,  # Within 1.1–1.3
+            "temperature": 0.75,         # Slightly higher for dialogue expressiveness
+            "exaggeration": 0.65,        # More expression for dialogue
+            "cfg_weight": 0.55,          # Slightly lower for more natural flow
+            "repetition_penalty": 1.2,   # Standard
             "min_p": 0.05,
-            "top_p": 0.92,               # 0.9–0.95
+            "top_p": 0.9,                # Slightly lower for more focused sampling
         },
         ContentType.NARRATIVE: {
-            "temperature": 0.65,         # More monotone
-            "exaggeration": 0.4,         # Reduce expressiveness
-            "cfg_weight": 0.65,          # Stronger adherence
-            "repetition_penalty": 1.25,
+            "temperature": 0.7,          # Balanced for narrative flow
+            "exaggeration": 0.5,         # Moderate expression for storytelling
+            "cfg_weight": 0.6,           # Good adherence for consistency
+            "repetition_penalty": 1.2,
             "min_p": 0.05,
-            "top_p": 0.9,
+            "top_p": 0.92,               # Slightly higher for narrative variety
         },
         ContentType.DESCRIPTIVE: {
-            "temperature": 0.65,         # More monotone
-            "exaggeration": 0.35,        # Calmer delivery
-            "cfg_weight": 0.65,          # Stronger adherence
-            "repetition_penalty": 1.25,
+            "temperature": 0.68,         # Slightly higher for descriptive richness
+            "exaggeration": 0.45,        # Moderate expression for descriptions
+            "cfg_weight": 0.58,          # Balanced adherence
+            "repetition_penalty": 1.15,  # Slightly lower to allow more natural flow
             "min_p": 0.05,
-            "top_p": 0.9,
+            "top_p": 0.94,               # Higher for descriptive variety
         },
         ContentType.TRANSITION: {
-            "temperature": 0.7,          # Stable
-            "exaggeration": 0.45,        # Slightly calmer
-            "cfg_weight": 0.6,           # Adherence
-            "repetition_penalty": 1.25,
+            "temperature": 0.72,         # Slightly higher for smooth transitions
+            "exaggeration": 0.5,         # Moderate expression
+            "cfg_weight": 0.55,          # Slightly lower for natural flow
+            "repetition_penalty": 1.18,  # Lower for smoother transitions
             "min_p": 0.05,
-            "top_p": 0.92,
+            "top_p": 0.93,               # Higher for transition variety
         }
     }
     
@@ -487,8 +487,14 @@ class AdaptiveParameterManager:
         
         # Apply dialogue-specific adjustments
         if chunk_info.dialogue_ratio > 0.1:
-            params["exaggeration"] = min(0.8, params["exaggeration"] * 1.1)  # More expression
-            params["temperature"] = max(0.6, params["temperature"] * 0.95)   # More consistency
+            params["exaggeration"] = min(0.8, params["exaggeration"] * 1.15)  # More expression for dialogue
+            params["temperature"] = max(0.6, params["temperature"] * 0.98)   # Slightly more consistency
+        
+        # Apply descriptive-specific adjustments for slower, more narrative delivery
+        if chunk_info.content_type == ContentType.DESCRIPTIVE:
+            params["temperature"] = max(0.65, params["temperature"] * 0.95)  # Slightly more consistent for descriptions
+            params["cfg_weight"] = min(0.7, params["cfg_weight"] * 1.05)     # Slightly stronger adherence
+            params["repetition_penalty"] = max(1.1, params["repetition_penalty"] * 0.98)  # Allow more natural repetition
         
         # Clamp all parameters to safe ranges
         params = self._clamp_parameters(params)
@@ -1058,10 +1064,10 @@ class AdvancedStitcher:
         
         # Content type pause modifiers
         self.content_type_modifiers = {
-            ContentType.DIALOGUE: 0.9,     # Faster pacing for conversation
-            ContentType.NARRATIVE: 1.1,    # Standard pacing for storytelling
-            ContentType.DESCRIPTIVE: 1.2,  # Slower pacing for descriptions
-            ContentType.TRANSITION: 0.9,   # Slightly faster for transitions
+            ContentType.DIALOGUE: 0.85,    # Faster pacing for conversation
+            ContentType.NARRATIVE: 1.15,   # Slower pacing for storytelling
+            ContentType.DESCRIPTIVE: 1.25, # Even slower pacing for descriptions
+            ContentType.TRANSITION: 0.95,  # Slightly faster for transitions
         }
         
         # Fade settings
@@ -1070,7 +1076,7 @@ class AdvancedStitcher:
         self.crossfade_duration = 25 # ms for overlapping chunks
 
         # Global pause scaling to control narration pace (1.0 = baseline)
-        self.global_pause_factor = 1.0
+        self.global_pause_factor = 1.2  # Increase global pauses for more narrative pacing
 
         # Final loudness normalization (EBU R128) configuration (default OFF to avoid impacting voice color)
         self.enable_loudness_normalization = False
