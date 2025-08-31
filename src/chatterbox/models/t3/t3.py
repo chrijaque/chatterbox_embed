@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from torch import nn, Tensor
 from transformers import LlamaModel, LlamaConfig
 from transformers.generation.logits_process import MinPLogitsWarper, RepetitionPenaltyLogitsProcessor, TopPLogitsWarper
+from ..s3tokenizer import SPEECH_VOCAB_SIZE
 
 from .modules.learned_pos_emb import LearnedPositionEmbeddings
 
@@ -328,6 +329,23 @@ class T3(nn.Module):
                 logits = logits_cond + cfg_weight * (logits_cond - logits_uncond)
 
             logits = logits.squeeze(1)
+
+            # Restrict sampling to S3 vocab (< SPEECH_VOCAB_SIZE) and allow EOS token only
+            # to avoid drifting into undefined token space that can decode as silence.
+            if logits.dim() == 2:
+                # Batch x Vocab
+                invalid_mask = torch.ones_like(logits, dtype=torch.bool)
+                invalid_mask[:, :SPEECH_VOCAB_SIZE] = False
+                # Keep EOS token unmasked
+                invalid_mask[:, self.hp.stop_speech_token] = False
+                logits = logits.masked_fill(invalid_mask, float('-inf'))
+            else:
+                # Vocab
+                vocab_size = logits.size(-1)
+                mask = torch.ones(vocab_size, dtype=torch.bool, device=logits.device)
+                mask[:SPEECH_VOCAB_SIZE] = False
+                mask[self.hp.stop_speech_token] = False
+                logits[mask] = float('-inf')
 
             # Apply temperature scaling.
             if temperature != 1.0:

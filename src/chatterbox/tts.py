@@ -2003,6 +2003,7 @@ class ChatterboxTTS:
                 t3_cond=chunk_conditionals.t3,
                 text_tokens=text_tokens,
                 max_new_tokens=max_new_tokens_override or 1000,  # dynamic cap for long chunks
+                show_progress=True,
                 temperature=temperature,
                 cfg_weight=cfg_weight,
                 repetition_penalty=repetition_penalty,
