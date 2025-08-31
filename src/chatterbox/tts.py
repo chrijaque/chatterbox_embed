@@ -460,8 +460,8 @@ class AdaptiveParameterManager:
                     params["exaggeration"] = max(0.1, min(self.first_chunk_exaggeration_cap, params.get("exaggeration", 0.5) + min(0.1, self.intro_exaggeration_boost * 0.5)))
                     params["cfg_weight"] = max(self.first_chunk_min_cfg_weight, params.get("cfg_weight", 0.5))
 
-            # Apply opener preset to further calm the opener
-            if self.enable_opener_preset:
+            # Apply opener preset ONLY for short openers; avoid clamping a long first chunk
+            if self.enable_opener_preset and (chunk_info.word_count <= self.intro_boost_max_words or chunk_info.char_count <= 220):
                 params["temperature"] = min(params.get("temperature", 0.8), self.opener_temperature)
                 params["cfg_weight"] = max(params.get("cfg_weight", 0.5), self.opener_cfg_weight)
                 params["exaggeration"] = min(params.get("exaggeration", 0.5), self.opener_exaggeration)
@@ -1629,20 +1629,35 @@ class ChatterboxTTS:
         ve.load_state_dict(
             load_file(ckpt_dir / "ve.safetensors")
         )
-        ve.to(device).eval()
+        try:
+            ve.to(device).eval()
+        except Exception as e:
+            logger.warning(f"Failed to move VoiceEncoder to device '{device}': {e}. Falling back to CPU.")
+            device = "cpu"
+            ve.to(device).eval()
 
         t3 = T3()
         t3_state = load_file(ckpt_dir / "t3_cfg.safetensors")
         if "model" in t3_state.keys():
             t3_state = t3_state["model"][0]
         t3.load_state_dict(t3_state)
-        t3.to(device).eval()
+        try:
+            t3.to(device).eval()
+        except Exception as e:
+            logger.warning(f"Failed to move T3 to device '{device}': {e}. Falling back to CPU.")
+            device = "cpu"
+            t3.to(device).eval()
 
         s3gen = S3Gen()
         s3gen.load_state_dict(
             load_file(ckpt_dir / "s3gen.safetensors"), strict=False
         )
-        s3gen.to(device).eval()
+        try:
+            s3gen.to(device).eval()
+        except Exception as e:
+            logger.warning(f"Failed to move S3Gen to device '{device}': {e}. Falling back to CPU.")
+            device = "cpu"
+            s3gen.to(device).eval()
 
         tokenizer = EnTokenizer(
             str(ckpt_dir / "tokenizer.json")
@@ -1732,6 +1747,10 @@ class ChatterboxTTS:
 
     @classmethod
     def from_pretrained(cls, device) -> 'ChatterboxTTS':
+        # Resolve/validate requested device, fallback to CPU when unavailable
+        if device == "cuda" and not torch.cuda.is_available():
+            print("CUDA not available or visible. Falling back to CPU.")
+            device = "cpu"
         # Check if MPS is available on macOS
         if device == "mps" and not torch.backends.mps.is_available():
             if not torch.backends.mps.is_built():
@@ -1946,6 +1965,7 @@ class ChatterboxTTS:
         top_p=1.0,
         cfg_weight=0.5,
         temperature=0.8,
+        max_new_tokens_override: Optional[int] = None,
     ):
         """
         Generate audio with provided conditionals, optionally overriding exaggeration per chunk.
@@ -1982,7 +2002,7 @@ class ChatterboxTTS:
             speech_tokens = self.t3.inference(
                 t3_cond=chunk_conditionals.t3,
                 text_tokens=text_tokens,
-                max_new_tokens=1000,  # TODO: use the value in config
+                max_new_tokens=max_new_tokens_override or 1000,  # dynamic cap for long chunks
                 temperature=temperature,
                 cfg_weight=cfg_weight,
                 repetition_penalty=repetition_penalty,
@@ -2051,10 +2071,13 @@ class ChatterboxTTS:
                 rest = sanitized_text[first_dot_idx + 1 :].lstrip()
                 lead_chunk = self.smart_chunker._create_chunk_info(0, lead, True, False)
                 rest_chunks = self.smart_chunker.smart_chunk(rest, target_chars, max_chars)
+                # Normalize flags and ids so ONLY the true opener is marked first
                 for i, ch in enumerate(rest_chunks):
                     ch.id = i + 1
-                    if i == len(rest_chunks) - 1:
-                        ch.is_last_chunk = True
+                    # Ensure none of the rest chunks are treated as openers
+                    ch.is_first_chunk = False
+                    # Only the very last chunk overall should be marked last
+                    ch.is_last_chunk = (i == len(rest_chunks) - 1)
                 if rest_chunks:
                     lead_chunk.is_last_chunk = False
                 else:
@@ -2166,6 +2189,9 @@ class ChatterboxTTS:
                     torch.cuda.empty_cache()
 
                 if pre_prepared_conditionals is not None:
+                    # Dynamic token budget: ~2.1 tokens per char (+buffer), clamped
+                    est_tokens = int(chunk_info.char_count * 2.1) + 60
+                    dynamic_max_new = max(220, min(1100, est_tokens))
                     audio_tensor = self._generate_with_prepared_conditionals(
                         text=chunk_info.text,
                         conditionals=pre_prepared_conditionals,
@@ -2175,6 +2201,7 @@ class ChatterboxTTS:
                         repetition_penalty=adaptive_params.get("repetition_penalty", 1.2),
                         min_p=adaptive_params.get("min_p", 0.05),
                         top_p=adaptive_params.get("top_p", 1.0),
+                        max_new_tokens_override=dynamic_max_new,
                     )
                 else:
                     audio_tensor = self.generate(

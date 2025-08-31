@@ -245,7 +245,12 @@ class ChatterboxVC:
         ve.load_state_dict(
             load_file(ckpt_dir / "ve.safetensors")
         )
-        ve.to(device).eval()
+        try:
+            ve.to(device).eval()
+        except Exception as e:
+            logger.warning(f"Failed to move VoiceEncoder to device '{device}': {e}. Falling back to CPU.")
+            device = "cpu"
+            ve.to(device).eval()
         logger.info(f"  - VoiceEncoder loaded and moved to {device}")
 
         # Load T3 model
@@ -255,7 +260,12 @@ class ChatterboxVC:
         if "model" in t3_state.keys():
             t3_state = t3_state["model"][0]
         t3.load_state_dict(t3_state)
-        t3.to(device).eval()
+        try:
+            t3.to(device).eval()
+        except Exception as e:
+            logger.warning(f"Failed to move T3 to device '{device}': {e}. Falling back to CPU.")
+            device = "cpu"
+            t3.to(device).eval()
         logger.info(f"  - T3 model loaded and moved to {device}")
 
         # Load S3Gen
@@ -264,7 +274,12 @@ class ChatterboxVC:
         s3gen.load_state_dict(
             load_file(ckpt_dir / "s3gen.safetensors"), strict=False
         )
-        s3gen.to(device).eval()
+        try:
+            s3gen.to(device).eval()
+        except Exception as e:
+            logger.warning(f"Failed to move S3Gen to device '{device}': {e}. Falling back to CPU.")
+            device = "cpu"
+            s3gen.to(device).eval()
         logger.info(f"  - S3Gen model loaded and moved to {device}")
 
         # Load tokenizer
@@ -294,6 +309,10 @@ class ChatterboxVC:
         logger.info(f"  - device: {device}")
         
         # Check if MPS is available on macOS
+        if device == "cuda" and not torch.cuda.is_available():
+            logger.warning("CUDA not available or visible. Falling back to CPU.")
+            device = "cpu"
+            logger.info(f"  - device changed to: {device}")
         if device == "mps" and not torch.backends.mps.is_available():
             if not torch.backends.mps.is_built():
                 logger.warning("MPS not available because the current PyTorch install was not built with MPS enabled.")
