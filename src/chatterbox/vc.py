@@ -1267,16 +1267,17 @@ class ChatterboxVC:
                     kids_segment = 'kids/' if is_kids_voice else ''
                     profile_path = f"audio/voices/{language}/{kids_segment}profiles/{profile_filename}"
                     sample_path = f"audio/voices/{language}/{kids_segment}samples/{sample_filename}"
+                    # Use enriched metadata if available, fall back to raw metadata
+                    _meta_for_cb = enriched if 'enriched' in locals() else ((metadata or {}).get('storage_metadata') or {})
                     payload = {
                         'status': 'success',
-                        'user_id': storage_metadata.get('user_id', ''),
+                        'user_id': _meta_for_cb.get('user_id', ''),
                         'voice_id': voice_id,
-                        'voice_name': storage_metadata.get('voice_name', ''),
+                        'voice_name': _meta_for_cb.get('voice_name', ''),
                         'language': language,
                         'profile_path': profile_path,
                         'sample_path': sample_path,
                     }
-                    
 
                     secret = os.getenv('DAEZEND_API_SHARED_SECRET')
                     if secret:
@@ -1314,15 +1315,17 @@ class ChatterboxVC:
                     import hmac, hashlib, time, json
                     from urllib.parse import urlparse
                     from urllib.request import Request, urlopen
+                    # Build a minimal, safe metadata dict from provided metadata
+                    _storage_meta = (metadata or {}).get('storage_metadata') or {}
+                    _safe_language = (metadata or {}).get('language', 'en')
                     payload = {
                         'status': 'error',
-                        'user_id': storage_metadata.get('user_id', ''),
+                        'user_id': _storage_meta.get('user_id', ''),
                         'voice_id': voice_id or '',
-                        'voice_name': storage_metadata.get('voice_name', ''),
-                        'language': language,
+                        'voice_name': _storage_meta.get('voice_name', ''),
+                        'language': _safe_language,
                         'error': str(e),
                     }
-                    
 
                     secret = os.getenv('DAEZEND_API_SHARED_SECRET')
                     if secret:
