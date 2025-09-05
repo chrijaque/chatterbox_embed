@@ -2326,7 +2326,16 @@ class ChatterboxTTS:
         
         # Prepare conditionals once and reuse for all chunks to avoid recomputation
         logger.info(f"🎯 Preparing conditionals once for {len(chunk_infos)} chunks")
-        self.prepare_conditionals(voice_profile_path, exaggeration=base_exaggeration)
+        try:
+            # If a full voice profile (.npy) is provided, use the dedicated loader
+            if isinstance(voice_profile_path, str) and voice_profile_path.lower().endswith('.npy'):
+                self.prepare_conditionals_with_voice_profile(voice_profile_path, exaggeration=base_exaggeration)
+            else:
+                # Otherwise treat it as an audio prompt path
+                self.prepare_conditionals(voice_profile_path, exaggeration=base_exaggeration)
+        except Exception:
+            logger.exception("❌ Failed to prepare conditionals")
+            raise
 
         logger.info(f"🔄 Using sequential processing with cached conditionals for {len(chunk_infos)} chunks")
         wav_paths = []
