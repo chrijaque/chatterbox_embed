@@ -1079,9 +1079,9 @@ class AdvancedStitcher:
         self.global_pause_factor = 1.2  # Increase global pauses for more narrative pacing
 
         # Final loudness normalization (EBU R128) configuration (default OFF to avoid impacting voice color)
-        self.enable_loudness_normalization = False
+        self.enable_loudness_normalization = False  # Keep OFF for speed
         # Disable per-chunk normalization for performance (final pass only if enabled)
-        self.enable_per_chunk_normalization = False
+        self.enable_per_chunk_normalization = False  # Keep OFF for speed
         # Gentle fade-in for the very first chunk to avoid abrupt start (ms)
         self.fade_in_first_chunk_ms = 130
 
@@ -1494,9 +1494,9 @@ class ChatterboxTTS:
         self.quality_analyzer = ChunkQualityAnalyzer()
         self.advanced_stitcher = AdvancedStitcher()
         
-        # Parallel processing settings - ENABLE FOR SPEED
-        self.max_parallel_workers = min(4, len(chunk_infos))  # Enable parallel processing
-        self.enable_parallel_processing = True  # Enable for better performance
+        # Parallel processing settings
+        self.max_parallel_workers = 1  # Disabled for single-user processing
+        self.enable_parallel_processing = False  # Disabled as requested
         # Quality Analysis toggle (disable to remove overhead)
         self.enable_quality_analysis = False
         
@@ -2089,7 +2089,7 @@ class ChatterboxTTS:
 
         # Opener heuristic: ensure the first chunk is not a micro-opener. Prefer at least 2 sentences or >=250 chars.
         first_dot_idx = sanitized_text.find('.')
-        chunk_infos: List[ChunkInfo]
+        chunk_infos: List[ChunkInfo] = []  # Initialize to avoid undefined variable errors
         if 0 <= first_dot_idx <= 300:  # Increased threshold to avoid micro-chunks
             lead = sanitized_text[: first_dot_idx + 1].strip()
             # Count sentences in the opener candidate
@@ -2122,6 +2122,11 @@ class ChatterboxTTS:
         # Step 4: Mark chunks that should have story break pauses
         if story_break_positions:
             self._mark_story_break_chunks(chunk_infos, story_break_positions, text)
+
+        # Ensure chunk_infos is always defined and not empty
+        if not chunk_infos:
+            logger.warning("⚠️ No chunks generated, falling back to basic chunking")
+            chunk_infos = self.smart_chunker.smart_chunk(sanitized_text, target_chars, max_chars)
         
         # Log detailed chunk analysis
         if chunk_infos:
@@ -2421,11 +2426,11 @@ class ChatterboxTTS:
         #     voice_profile_path=voice_profile_path,
         #     exaggeration=base_exaggeration
         # )
-        # 
+        #
         # # Log cache performance
         # cache_stats = self.get_conditional_cache_stats()
         # logger.info(f"📊 Conditional cache stats: {cache_stats['hits']} hits, {cache_stats['misses']} misses ({cache_stats['hit_rate_percent']:.1f}% hit rate)")
-        # 
+        #
         # # Use the centralized generation logic
         # return self._generate_chunks_with_prepared_conditionals(
         #     chunk_infos, pre_prepared_conditionals, generation_start
@@ -2979,11 +2984,11 @@ class ChatterboxTTS:
         #     audio_prompt_path=audio_prompt_path,
         #     exaggeration=base_exaggeration
         # )
-        # 
+        #
         # # Log cache performance
         # cache_stats = self.get_conditional_cache_stats()
         # logger.info(f"📊 Conditional cache stats: {cache_stats['hits']} hits, {cache_stats['misses']} misses ({cache_stats['hit_rate_percent']:.1f}% hit rate)")
-        # 
+        #
         # # Use the same generation logic as the main method
         # return self._generate_chunks_with_prepared_conditionals(
         #     chunk_infos, pre_prepared_conditionals, generation_start
@@ -3029,11 +3034,11 @@ class ChatterboxTTS:
         #     audio_prompt_path=audio_prompt_path,
         #     exaggeration=base_exaggeration
         # )
-        # 
+        #
         # # Log cache performance
         # cache_stats = self.get_conditional_cache_stats()
         # logger.info(f"📊 Conditional cache stats: {cache_stats['hits']} hits, {cache_stats['misses']} misses ({cache_stats['hit_rate_percent']:.1f}% hit rate)")
-        # 
+        #
         # # Use the same generation logic as the main method
         # return self._generate_chunks_with_prepared_conditionals(
         #     chunk_infos, pre_prepared_conditionals, generation_start
