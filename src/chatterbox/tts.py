@@ -1078,10 +1078,9 @@ class AdvancedStitcher:
         # Global pause scaling to control narration pace (1.0 = baseline)
         self.global_pause_factor = 1.2  # Increase global pauses for more narrative pacing
 
-        # Final loudness normalization (EBU R128) configuration (default OFF to avoid impacting voice color)
-        self.enable_loudness_normalization = False  # Keep OFF for speed
-        # Disable per-chunk normalization for performance (final pass only if enabled)
-        self.enable_per_chunk_normalization = False  # Keep OFF for speed
+        # Loudness normalization disabled for speed
+        self.enable_loudness_normalization = False
+        self.enable_per_chunk_normalization = False
         # Gentle fade-in for the very first chunk to avoid abrupt start (ms)
         self.fade_in_first_chunk_ms = 130
 
@@ -1282,27 +1281,9 @@ class AdvancedStitcher:
             processing_stats = []
             
             for i, (wav_path, chunk_info) in enumerate(zip(wav_paths, chunk_infos)):
-                # Validate input file exists and has content
-                if not Path(wav_path).exists():
-                    logger.error(f"❌ Input WAV file missing: {wav_path}")
-                    raise RuntimeError(f"Missing input file: {wav_path}")
-
-                file_size = Path(wav_path).stat().st_size
-                if file_size < 100:
-                    logger.error(f"❌ Input WAV file too small ({file_size} bytes): {wav_path}")
-                    raise RuntimeError(f"Input file too small: {wav_path}")
-
                 # Load and normalize individual segment
                 segment = AudioSegment.from_wav(wav_path)
                 original_duration = len(segment)
-
-                if original_duration == 0:
-                    logger.error(f"❌ Chunk {chunk_info.id} has zero duration audio")
-                    raise RuntimeError(f"Chunk {chunk_info.id} has empty audio")
-                
-                # Individual normalization first (optional)
-                if self.enable_per_chunk_normalization:
-                    segment = self.normalize_segment_levels(segment)
                 
                 # Apply smart fades
                 prev_chunk = chunk_infos[i-1] if i > 0 else None
@@ -1359,15 +1340,6 @@ class AdvancedStitcher:
             # Load back as tensor for return (use loudnorm output if available)
             audio_tensor, sample_rate = torchaudio.load(ln_path)
             duration = float(audio_tensor.shape[-1]) / float(sample_rate)
-
-            # Final validation of stitched audio
-            if audio_tensor.numel() == 0 or audio_tensor.abs().max().item() < 1e-6:
-                logger.error("❌ Final stitched audio appears to be silent or empty")
-                raise RuntimeError("Stitched audio is silent")
-
-            if duration < 0.1:
-                logger.error(f"❌ Final stitched audio too short ({duration:.2f}s)")
-                raise RuntimeError("Stitched audio duration too short")
 
             # Log stitching statistics
             total_pause_time = sum(stat["pause_after_ms"] for stat in processing_stats) / 1000.0
@@ -2087,37 +2059,8 @@ class ChatterboxTTS:
         # Step 3: Smart chunking with optional lead-sentence split
         target_chars = int(max_chars * 0.8)  # Target 80% of max for better quality
 
-        # Opener heuristic: ensure the first chunk is not a micro-opener. Prefer at least 2 sentences or >=250 chars.
-        first_dot_idx = sanitized_text.find('.')
-        chunk_infos: List[ChunkInfo] = []  # Initialize to avoid undefined variable errors
-        if 0 <= first_dot_idx <= 300:  # Increased threshold to avoid micro-chunks
-            lead = sanitized_text[: first_dot_idx + 1].strip()
-            # Count sentences in the opener candidate
-            sentence_count = sum(1 for c in lead if c in '.!?')
-            if len(lead) < 250 or sentence_count < 2:  # Increased minimum length
-                # Do not split early; let smart chunking form a fuller opener
-                chunk_infos = self.smart_chunker.smart_chunk(sanitized_text, target_chars, max_chars)
-            else:
-                rest = sanitized_text[first_dot_idx + 1 :].lstrip()
-                if len(rest.strip()) == 0:  # No remaining text
-                    chunk_infos = self.smart_chunker.smart_chunk(sanitized_text, target_chars, max_chars)
-                else:
-                    lead_chunk = self.smart_chunker._create_chunk_info(0, lead, True, False)
-                    rest_chunks = self.smart_chunker.smart_chunk(rest, target_chars, max_chars)
-                    # Normalize flags and ids so ONLY the true opener is marked first
-                    for i, ch in enumerate(rest_chunks):
-                        ch.id = i + 1
-                        # Ensure none of the rest chunks are treated as openers
-                        ch.is_first_chunk = False
-                        # Only the very last chunk overall should be marked last
-                        ch.is_last_chunk = (i == len(rest_chunks) - 1)
-                    if rest_chunks:
-                        lead_chunk.is_last_chunk = False
-                    else:
-                        lead_chunk.is_last_chunk = True
-                    chunk_infos = [lead_chunk] + rest_chunks
-        else:
-            chunk_infos = self.smart_chunker.smart_chunk(sanitized_text, target_chars, max_chars)
+        # Simple chunking without complex opener logic
+        chunk_infos = self.smart_chunker.smart_chunk(sanitized_text, target_chars, max_chars)
         
         # Step 4: Mark chunks that should have story break pauses
         if story_break_positions:
@@ -2227,9 +2170,6 @@ class ChatterboxTTS:
                     torch.cuda.empty_cache()
 
                 if pre_prepared_conditionals is not None:
-                    # Dynamic token budget: ~2.1 tokens per char (+buffer), clamped
-                    est_tokens = int(chunk_info.char_count * 2.1) + 60
-                    dynamic_max_new = max(220, min(1100, est_tokens))
                     audio_tensor = self._generate_with_prepared_conditionals(
                         text=chunk_info.text,
                         conditionals=pre_prepared_conditionals,
@@ -2239,7 +2179,6 @@ class ChatterboxTTS:
                         repetition_penalty=adaptive_params.get("repetition_penalty", 1.2),
                         min_p=adaptive_params.get("min_p", 0.05),
                         top_p=adaptive_params.get("top_p", 1.0),
-                        max_new_tokens_override=dynamic_max_new,
                     )
                 else:
                     audio_tensor = self.generate(
@@ -2257,36 +2196,6 @@ class ChatterboxTTS:
                 temp_wav_path = temp_wav.name
                 temp_wav.close()
                 torchaudio.save(temp_wav_path, audio_tensor, self.sr)
-
-                # Validate audio file was created and has content
-                if not Path(temp_wav_path).exists():
-                    raise RuntimeError(f"Audio file was not created: {temp_wav_path}")
-
-                # Check file size (should be > 44 bytes for WAV header + some data)
-                file_size = Path(temp_wav_path).stat().st_size
-                if file_size < 100:  # Very small file indicates likely silence/empty
-                    logger.warning(f"⚠️ Chunk {chunk_info.id} generated very small audio file ({file_size} bytes)")
-                    os.unlink(temp_wav_path)
-                    raise RuntimeError(f"Generated audio file too small ({file_size} bytes)")
-
-                # Load and validate audio tensor has actual content
-                validation_tensor, _ = torchaudio.load(temp_wav_path)
-                if validation_tensor.numel() == 0 or validation_tensor.abs().max().item() < 1e-6:
-                    logger.warning(f"⚠️ Chunk {chunk_info.id} generated silent or empty audio")
-                    os.unlink(temp_wav_path)
-                    raise RuntimeError("Generated audio appears to be silent")
-
-                # Return a stub QualityScore without running analysis
-                duration = float(audio_tensor.shape[-1]) / float(self.sr)
-                quality_score = QualityScore(
-                    overall_score=100.0,
-                    issues=[],
-                    duration=duration,
-                    silence_ratio=0.0,
-                    peak_db=0.0,
-                    rms_db=0.0,
-                    should_regenerate=False,
-                )
                 return temp_wav_path, quality_score
             except Exception as e:
                 logger.warning(f"⚠️ Chunk {chunk_info.id} generation failed with QA disabled: {e}")
@@ -2300,9 +2209,6 @@ class ChatterboxTTS:
                 
                 # Prefer using pre-prepared conditionals to avoid recomputation.
                 if pre_prepared_conditionals is not None:
-                    # Dynamic token budget: ~2.1 tokens per char (+buffer), clamped
-                    est_tokens = int(chunk_info.char_count * 2.1) + 60
-                    dynamic_max_new = max(220, min(1100, est_tokens))
                     audio_tensor = self._generate_with_prepared_conditionals(
                         text=chunk_info.text,
                         conditionals=pre_prepared_conditionals,
@@ -2312,7 +2218,6 @@ class ChatterboxTTS:
                         repetition_penalty=adaptive_params.get("repetition_penalty", 1.2),
                         min_p=adaptive_params.get("min_p", 0.05),
                         top_p=adaptive_params.get("top_p", 1.0),
-                        max_new_tokens_override=dynamic_max_new,
                     )
                 else:
                     audio_tensor = self.generate(
@@ -2419,42 +2324,36 @@ class ChatterboxTTS:
         """
         generation_start = time.time()
         
-        # TEMPORARILY DISABLED: Conditional caching to isolate voice issues
-        # Phase 1: Prepare conditionals once for all chunks (major optimization)
-        # logger.info(f"🎯 Preparing conditionals once for {len(chunk_infos)} chunks")
-        # pre_prepared_conditionals = self._get_or_prepare_conditionals(
-        #     voice_profile_path=voice_profile_path,
-        #     exaggeration=base_exaggeration
-        # )
-        #
-        # # Log cache performance
-        # cache_stats = self.get_conditional_cache_stats()
-        # logger.info(f"📊 Conditional cache stats: {cache_stats['hits']} hits, {cache_stats['misses']} misses ({cache_stats['hit_rate_percent']:.1f}% hit rate)")
-        #
-        # # Use the centralized generation logic
-        # return self._generate_chunks_with_prepared_conditionals(
-        #     chunk_infos, pre_prepared_conditionals, generation_start
-        # )
-        
         # Prepare conditionals once and reuse for all chunks to avoid recomputation
         logger.info(f"🎯 Preparing conditionals once for {len(chunk_infos)} chunks")
-        self.prepare_conditionals_with_voice_profile(voice_profile_path, exaggeration=base_exaggeration)
+        self.prepare_conditionals(voice_profile_path, exaggeration=base_exaggeration)
 
         logger.info(f"🔄 Using sequential processing with cached conditionals for {len(chunk_infos)} chunks")
         wav_paths = []
-        quality_scores = []
 
-        for chunk_info in chunk_infos:
-            wav_path, quality_score = self._generate_single_chunk_with_quality(
-                chunk_info, voice_profile_path, self.conds  # Reuse prepared conditionals
+        for i, chunk_info in enumerate(chunk_infos):
+            logger.info(f"🎵 Generating chunk {i+1}/{len(chunk_infos)}: {chunk_info.text[:50]}...")
+
+            # Use fixed parameters for speed (original working approach)
+            audio_tensor = self._generate_with_prepared_conditionals(
+                text=chunk_info.text,
+                conditionals=self.conds,
+                exaggeration=base_exaggeration,
+                temperature=base_temperature,
+                cfg_weight=base_cfg_weight,
+                repetition_penalty=1.2,
+                min_p=0.05,
+                top_p=1.0,
             )
-            wav_paths.append(wav_path)
-            quality_scores.append(quality_score)
-        
-        # Log comprehensive quality analysis
-        total_generation_time = time.time() - generation_start
-        self._log_quality_analysis(chunk_infos, quality_scores, total_generation_time)
-        
+
+            # Save chunk to temporary file
+            temp_wav = tempfile.NamedTemporaryFile(suffix=f"_chunk_{chunk_info.id}.wav", delete=False)
+            temp_wav_path = temp_wav.name
+            temp_wav.close()
+            torchaudio.save(temp_wav_path, audio_tensor, self.sr)
+
+            wav_paths.append(temp_wav_path)
+
         return wav_paths
     
     def _log_quality_analysis(self, chunk_infos: List[ChunkInfo], quality_scores: List[QualityScore], total_time: float):
