@@ -322,8 +322,18 @@ class ChatterboxVC:
             logger.info(f"  - device changed to: {device}")
             
         logger.info(f"  - Downloading model files...")
+        # Prefer an explicit HF cache dir if provided to avoid small /root cache quotas on some runtimes
+        _hf_cache_dir = os.getenv("HF_HOME") or os.getenv("TRANSFORMERS_CACHE") or None
+        if _hf_cache_dir:
+            try:
+                os.makedirs(_hf_cache_dir, exist_ok=True)
+                logger.info(f"  - Using HF cache dir: {_hf_cache_dir}")
+            except Exception as _mk_e:
+                logger.warning(f"  - Could not create HF cache dir '{_hf_cache_dir}': {_mk_e}. Falling back to default cache.")
+                _hf_cache_dir = None
+
         for fpath in ["ve.safetensors", "t3_cfg.safetensors", "s3gen.safetensors", "tokenizer.json", "conds.pt"]:
-            local_path = hf_hub_download(repo_id=REPO_ID, filename=fpath)
+            local_path = hf_hub_download(repo_id=REPO_ID, filename=fpath, cache_dir=_hf_cache_dir)
             logger.info(f"  - Downloaded: {fpath} -> {local_path}")
 
         logger.info(f"  - Calling from_local...")
