@@ -1075,7 +1075,8 @@ class ChatterboxVC:
             
             profile_filename = metadata.get("profile_filename")
             sample_filename = metadata.get("sample_filename")
-            recorded_path_pointer = metadata.get("recorded_path")  # pointer to existing recorded file in Storage
+            # Pointer to existing recorded file in Storage (support legacy 'recorded_filename')
+            recorded_path_pointer = metadata.get("recorded_path") or metadata.get("recorded_filename")
             
             if not profile_filename:
                 raise ValueError("metadata.profile_filename is required")
@@ -1083,8 +1084,8 @@ class ChatterboxVC:
                 raise ValueError("metadata.sample_filename is required")
             # recorded upload is not required; recorded_path may be a pointer to existing file
             # Use filenames exactly as provided by the API with no modifications
-            recorded_path = metadata.get("recorded_path", "N/A")
-            logger.info(f"    - Using API filenames as-is → profile: {profile_filename}, sample: {sample_filename}, recorded: {recorded_path}")
+            _log_recorded = metadata.get("recorded_path") or metadata.get("recorded_filename") or "N/A"
+            logger.info(f"    - Using API filenames as-is → profile: {profile_filename}, sample: {sample_filename}, recorded: {_log_recorded}")
             
             user_id_meta = str(metadata.get("user_id", ""))
 
@@ -1283,9 +1284,10 @@ class ChatterboxVC:
                     from urllib.parse import urlparse
                     from urllib.request import Request, urlopen
                     # Build canonical storage paths using exact filenames
-                    kids_segment = 'kids/' if is_kids_voice else ''
-                    profile_path = f"audio/voices/{language}/{kids_segment}profiles/{profile_filename}"
-                    sample_path = f"audio/voices/{language}/{kids_segment}samples/{sample_filename}"
+                    base_path = f"audio/voices/{language}/kids" if is_kids_voice else f"audio/voices/{language}"
+                    profile_path = f"{base_path}/profiles/{profile_filename}"
+                    sample_path = f"{base_path}/samples/{sample_filename}"
+
                     # Use enriched metadata if available, fall back to raw metadata
                     _meta_for_cb = enriched if 'enriched' in locals() else ((metadata or {}).get('storage_metadata') or {})
                     payload = {
@@ -1294,28 +1296,32 @@ class ChatterboxVC:
                         'voice_id': voice_id,
                         'voice_name': _meta_for_cb.get('voice_name', ''),
                         'language': language,
+                        'is_kids_voice': bool(is_kids_voice),
+                        'model_type': (metadata or {}).get('model_type', 'chatterbox'),
                         'profile_path': profile_path,
                         'sample_path': sample_path,
+                        'recorded_path': recorded_path_for_response or '',
                     }
 
                     secret = os.getenv('DAEZEND_API_SHARED_SECRET')
+                    parsed = urlparse(cb_url)
+                    path = parsed.path or '/api/voice-clone/callback'
+                    ts = str(int(time.time() * 1000))
+                    body = json.dumps(payload).encode('utf-8')
+                    headers = {'Content-Type': 'application/json'}
                     if secret:
-                        parsed = urlparse(cb_url)
-                        path = parsed.path or '/api/voice-clone/callback'
-                        ts = str(int(time.time() * 1000))
-                        body = json.dumps(payload).encode('utf-8')
                         prefix = f"POST\n{path}\n{ts}\n".encode('utf-8')
                         sig = hmac.new(secret.encode('utf-8'), prefix + body, hashlib.sha256).hexdigest()
-                        req = Request(cb_url, data=body, headers={
-                            'Content-Type': 'application/json',
+                        headers.update({
                             'X-Daezend-Timestamp': ts,
                             'X-Daezend-Signature': sig,
-                        }, method='POST')
-                        try:
-                            with urlopen(req, timeout=15) as resp:
-                                _ = resp.read()
-                        except Exception as _cb_e:
-                            logger.warning(f"⚠️ Success callback failed: {_cb_e}")
+                        })
+                    req = Request(cb_url, data=body, headers=headers, method='POST')
+                    try:
+                        with urlopen(req, timeout=15) as resp:
+                            _ = resp.read()
+                    except Exception as _cb_e:
+                        logger.warning(f"⚠️ Success callback failed: {_cb_e}")
             except Exception:
                 pass
 
@@ -1337,33 +1343,55 @@ class ChatterboxVC:
                     # Build a minimal, safe metadata dict from provided metadata
                     _storage_meta = (metadata or {}).get('storage_metadata') or {}
                     _safe_language = (metadata or {}).get('language', 'en')
+                    _is_kids = bool((metadata or {}).get('is_kids_voice', False))
+                    _model = (metadata or {}).get('model_type', 'chatterbox')
+
+                    # Try to surface paths if filenames were provided
+                    try:
+                        base_path = f"audio/voices/{_safe_language}/kids" if _is_kids else f"audio/voices/{_safe_language}"
+                        _profile_fn = (metadata or {}).get('profile_filename') or ''
+                        _sample_fn = (metadata or {}).get('sample_filename') or ''
+                        _rec_path = (metadata or {}).get('recorded_path') or (metadata or {}).get('recorded_filename') or ''
+                        _profile_path = f"{base_path}/profiles/{_profile_fn}" if _profile_fn else ''
+                        _sample_path = f"{base_path}/samples/{_sample_fn}" if _sample_fn else ''
+                    except Exception:
+                        _profile_path = ''
+                        _sample_path = ''
+                        _rec_path = ''
+
                     payload = {
                         'status': 'error',
                         'user_id': _storage_meta.get('user_id', ''),
                         'voice_id': voice_id or '',
                         'voice_name': _storage_meta.get('voice_name', ''),
                         'language': _safe_language,
+                        'is_kids_voice': _is_kids,
+                        'model_type': _model,
+                        'profile_path': _profile_path,
+                        'sample_path': _sample_path,
+                        'recorded_path': _rec_path,
                         'error': str(e),
                     }
 
                     secret = os.getenv('DAEZEND_API_SHARED_SECRET')
+                    parsed = urlparse(cb_url)
+                    path = parsed.path or '/api/voice-clone/callback'
+                    ts = str(int(time.time() * 1000))
+                    body = json.dumps(payload).encode('utf-8')
+                    headers = {'Content-Type': 'application/json'}
                     if secret:
-                        parsed = urlparse(cb_url)
-                        path = parsed.path or '/api/voice-clone/callback'
-                        ts = str(int(time.time() * 1000))
-                        body = json.dumps(payload).encode('utf-8')
                         prefix = f"POST\n{path}\n{ts}\n".encode('utf-8')
                         sig = hmac.new(secret.encode('utf-8'), prefix + body, hashlib.sha256).hexdigest()
-                        req = Request(cb_url, data=body, headers={
-                            'Content-Type': 'application/json',
+                        headers.update({
                             'X-Daezend-Timestamp': ts,
                             'X-Daezend-Signature': sig,
-                        }, method='POST')
-                        try:
-                            with urlopen(req, timeout=15) as resp:
-                                _ = resp.read()
-                        except Exception as _cb_e:
-                            logger.warning(f"⚠️ Error callback failed: {_cb_e}")
+                        })
+                    req = Request(cb_url, data=body, headers=headers, method='POST')
+                    try:
+                        with urlopen(req, timeout=15) as resp:
+                            _ = resp.read()
+                    except Exception as _cb_e:
+                        logger.warning(f"⚠️ Error callback failed: {_cb_e}")
             except Exception:
                 pass
             
