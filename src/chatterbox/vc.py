@@ -189,7 +189,7 @@ class ChatterboxVC:
         logger.info(f"  - Available methods: {[m for m in dir(self) if not m.startswith('_')]}")
 
         # Final loudness normalization configuration for generated samples (default OFF to avoid impact)
-        self.enable_loudness_normalization = False
+        self.enable_loudness_normalization = True
         self.loudness_target_lufs = -19.4  # Integrated loudness (LUFS)
         self.loudness_target_tp = -1.0     # True peak (dBTP)
         self.loudness_target_lra = 11.0    # Loudness range (LU)

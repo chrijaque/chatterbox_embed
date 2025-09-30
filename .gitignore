@@ -57,3 +57,5 @@ example_tts_with_voice_cloning.py
 practical_voice_clone_test.py
 example_voice_embedding.py
 test_voice_profile_real.py
+local_frontend.py
+local_profiles

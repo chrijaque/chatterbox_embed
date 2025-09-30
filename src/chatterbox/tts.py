@@ -59,6 +59,51 @@ except ImportError:
 REPO_ID = "ResembleAI/chatterbox"
 
 
+def _get_git_sha() -> str:
+    """Return current git commit SHA if available, else 'unknown'."""
+    try:
+        import subprocess
+        sha = subprocess.check_output(["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL, text=True).strip()
+        if sha:
+            return sha
+    except Exception:
+        pass
+    # Try common env vars set by CI/CD
+    for key in ("GIT_COMMIT", "SOURCE_COMMIT", "COMMIT_SHA", "VERCEL_GIT_COMMIT_SHA"):
+        val = os.environ.get(key)
+        if val:
+            return val
+    return "unknown"
+
+
+def _peak_rms_dbfs_from_np(x: np.ndarray) -> Tuple[float, float]:
+    try:
+        x = x.astype(np.float64)
+        peak = float(np.max(np.abs(x)) + 1e-12)
+        rms = float(np.sqrt(np.mean(x ** 2) + 1e-12))
+        return 20.0 * np.log10(peak), 20.0 * np.log10(rms)
+    except Exception:
+        return float("nan"), float("nan")
+
+
+def _levels_from_tensor(tensor: torch.Tensor) -> Tuple[float, float]:
+    try:
+        if tensor.is_cuda or (hasattr(torch.backends, 'mps') and tensor.device.type == 'mps'):
+            tensor = tensor.to('cpu')
+        npy = tensor.squeeze(0).detach().numpy().astype(np.float32)
+        return _peak_rms_dbfs_from_np(npy)
+    except Exception:
+        return float("nan"), float("nan")
+
+
+def _maybe_log_seg_levels(tag: str, seg) -> None:
+    try:
+        if PYDUB_AVAILABLE and seg is not None:
+            logger.info(f"🔊 {tag}: peak={seg.max_dBFS:.2f} dBFS, avg={seg.dBFS:.2f} dBFS")
+    except Exception:
+        pass
+
+
 def punc_norm(text: str) -> str:
     """
         Quick cleanup func for punctuation from LLMs or
@@ -1079,8 +1124,8 @@ class AdvancedStitcher:
         self.global_pause_factor = 1.2  # Increase global pauses for more narrative pacing
 
         # Loudness normalization disabled for speed
-        self.enable_loudness_normalization = False
-        self.enable_per_chunk_normalization = False
+        self.enable_loudness_normalization = True
+        self.enable_per_chunk_normalization = True
         # Gentle fade-in for the very first chunk to avoid abrupt start (ms)
         self.fade_in_first_chunk_ms = 130
 
@@ -1264,6 +1309,15 @@ class AdvancedStitcher:
             return self._fallback_stitch(wav_paths, output_path)
         
         logger.info(f"🎼 Advanced stitching {len(wav_paths)} chunks with smart transitions")
+        try:
+            logger.info(
+                "🧪 Stitch cfg | loudnorm_enabled=%s, method=%s, ffmpeg_available=%s",
+                getattr(self, "enable_loudness_normalization", False),
+                getattr(self, "loudness_method", ""),
+                self._ffmpeg_available() if hasattr(self, "_ffmpeg_available") else False,
+            )
+        except Exception:
+            pass
         
         try:
             combined = AudioSegment.empty()
@@ -1318,16 +1372,32 @@ class AdvancedStitcher:
             # Export to file
             logger.info(f"🎼 Exporting stitched audio to: {output_path}")
             normalized_combined.export(output_path, format="wav")
+            try:
+                # Log file levels via pydub
+                seg = AudioSegment.from_wav(output_path)
+                _maybe_log_seg_levels("stitch export", seg)
+            except Exception:
+                pass
 
             # Final loudness normalization to target LUFS/TP/LRA
             ln_path = self.apply_loudness_normalization_file(output_path)
             if ln_path != output_path:
                 logger.info(f"🎚️ Applied loudness normalization: {ln_path}")
+                try:
+                    seg_ln = AudioSegment.from_wav(ln_path)
+                    _maybe_log_seg_levels("post loudnorm", seg_ln)
+                except Exception:
+                    pass
             else:
                 logger.info(f"🎚️ Loudness normalization skipped or failed; using original export")
 
             # Load back as tensor for return (use loudnorm output if available)
             audio_tensor, sample_rate = torchaudio.load(ln_path)
+            try:
+                pk, rm = _levels_from_tensor(audio_tensor)
+                logger.info(f"🔊 final tensor levels: peak={pk:.2f} dBFS, rms={rm:.2f} dBFS")
+            except Exception:
+                pass
             duration = float(audio_tensor.shape[-1]) / float(sample_rate)
 
             # Log stitching statistics
@@ -1499,6 +1569,19 @@ class ChatterboxTTS:
             logger.error(f"❌ MISSING METHODS: {missing_methods}")
         else:
             logger.info(f"✅ All expected methods are available!")
+
+        # Startup environment diagnostics
+        try:
+            logger.info(
+                "🧪 Audio env | PYDUB_AVAILABLE=%s, loudnorm_enabled=%s, loudnorm_method=%s, ffmpeg_available=%s, git_sha=%s",
+                PYDUB_AVAILABLE,
+                getattr(self.advanced_stitcher, "enable_loudness_normalization", False),
+                getattr(self.advanced_stitcher, "loudness_method", ""),
+                self.advanced_stitcher._ffmpeg_available() if hasattr(self.advanced_stitcher, "_ffmpeg_available") else False,
+                _get_git_sha(),
+            )
+        except Exception:
+            pass
 
     def _get_or_prepare_conditionals(self, voice_profile_path: str = None, 
                                    saved_voice_path: str = None, 
@@ -1942,6 +2025,12 @@ class ChatterboxTTS:
                 speech_tokens=speech_tokens,
                 ref_dict=self.conds.gen,
             )
+            # Diagnostics: levels after decode (tensor)
+            try:
+                peak_db, rms_db = _levels_from_tensor(wav)
+                logger.info(f"🔊 decode levels: peak={peak_db:.2f} dBFS, rms={rms_db:.2f} dBFS")
+            except Exception:
+                pass
             wav = wav.squeeze(0).detach().cpu().numpy()
         return torch.from_numpy(wav).unsqueeze(0)
 
@@ -2014,6 +2103,12 @@ class ChatterboxTTS:
                 speech_tokens=speech_tokens,
                 ref_dict=chunk_conditionals.gen,
             )
+            # Diagnostics: levels after decode (tensor)
+            try:
+                peak_db, rms_db = _levels_from_tensor(wav)
+                logger.info(f"🔊 decode levels: peak={peak_db:.2f} dBFS, rms={rms_db:.2f} dBFS")
+            except Exception:
+                pass
             wav = wav.squeeze(0).detach().cpu().numpy()
         return torch.from_numpy(wav).unsqueeze(0)
 
@@ -2522,6 +2617,7 @@ class ChatterboxTTS:
             try:
                 # Convert tensor to AudioSegment
                 audio_segment = self.tensor_to_audiosegment(audio_tensor, sample_rate)
+                _maybe_log_seg_levels("mp3 pre-export", audio_segment)
                 # Export to MP3 bytes
                 mp3_file = audio_segment.export(format="mp3", bitrate=bitrate)
                 # Read the bytes from the file object

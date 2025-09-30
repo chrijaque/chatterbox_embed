@@ -31,3 +31,5 @@ torchaudio[all]
 pytest
 black
 flake8 
+gradio>=4.44.0
+pydub>=0.25.1
