@@ -355,8 +355,8 @@ class AdaptiveParameterManager:
     # Base parameter profiles for different content types
     CONTENT_PROFILES = {
         ContentType.DIALOGUE: {
-            "temperature": 0.75,         # Slightly higher for dialogue expressiveness
-            "exaggeration": 0.65,        # More expression for dialogue
+            "temperature": 0.8,         # Slightly higher for dialogue expressiveness
+            "exaggeration": 0.7,        # More expression for dialogue
             "cfg_weight": 0.55,          # Slightly lower for more natural flow
             "repetition_penalty": 1.2,   # Standard
             "min_p": 0.05,
@@ -1150,20 +1150,9 @@ class AdvancedStitcher:
         try:
             # Use pydub's normalize function as a starting point
             normalized = effects.normalize(segment)
-            
-            # Additional RMS-based normalization for consistency
-            current_rms = segment.rms
-            if current_rms > 0:
-                # Target RMS based on LUFS approximation
-                target_rms = current_rms * (10 ** (target_lufs / 20))
-                adjustment_db = 20 * np.log10(target_rms / current_rms) if current_rms > 0 else 0
-                
-                # Limit adjustment to prevent distortion
-                adjustment_db = max(-12, min(6, adjustment_db))
-                
-                if abs(adjustment_db) > 0.5:  # Only adjust if meaningful difference
-                    normalized = normalized + adjustment_db
-            
+
+            # Remove additional RMS/LUFS-based attenuation to avoid reducing output volume
+            # Returning the peak-normalized segment preserves dynamics while preventing clipping
             return normalized
             
         except Exception as e:
