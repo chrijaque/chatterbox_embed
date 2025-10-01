@@ -188,12 +188,8 @@ class ChatterboxVC:
         logger.info(f"✅ ChatterboxVC initialized successfully")
         logger.info(f"  - Available methods: {[m for m in dir(self) if not m.startswith('_')]}")
 
-        # Final loudness normalization configuration for generated samples (default OFF to avoid impact)
-        self.enable_loudness_normalization = True
-        self.loudness_target_lufs = -19.4  # Integrated loudness (LUFS)
-        self.loudness_target_tp = -1.0     # True peak (dBTP)
-        self.loudness_target_lra = 11.0    # Loudness range (LU)
-        self.loudness_method = "ffmpeg"    # "ffmpeg" with two-pass loudnorm (preferred)
+        # Loudness normalization disabled
+        self.enable_loudness_normalization = False
 
         # Audio cleaning in cloning pipeline (enabled; this was the previous behavior)
         self.enable_audio_cleaning = True
@@ -410,42 +406,8 @@ class ChatterboxVC:
             return False
 
     def apply_loudness_normalization_tensor(self, audio_tensor: torch.Tensor, sample_rate: int) -> torch.Tensor:
-        """Normalize loudness of a tensor to target LUFS using ffmpeg two-pass (preferred)."""
-        if not self.enable_loudness_normalization:
-            return audio_tensor
-        import tempfile
-        import os as _os
-        try:
-            # Write to temp WAV
-            tmp_in = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-            tmp_in.close()
-            torchaudio.save(tmp_in.name, audio_tensor, sample_rate)
-
-            # Normalize to temp out
-            base, _ = _os.path.splitext(tmp_in.name)
-            tmp_out = base + "_loudnorm.wav"
-
-            ok = False
-            if self.loudness_method == "ffmpeg" and self._ffmpeg_available():
-                ok = self._run_ffmpeg_loudnorm(tmp_in.name, tmp_out)
-            if not ok:
-                ok = self._fallback_simple_loudness(tmp_in.name, tmp_out)
-
-            # Load result
-            out_path = tmp_out if ok else tmp_in.name
-            audio_norm, _ = torchaudio.load(out_path)
-
-            # Cleanup
-            for p in [tmp_in.name, tmp_out]:
-                try:
-                    if _os.path.exists(p):
-                        _os.unlink(p)
-                except Exception:
-                    pass
-
-            return audio_norm
-        except Exception:
-            return audio_tensor
+        """Removed: loudness normalization disabled (no-op)."""
+        return audio_tensor
 
     def set_target_voice(self, wav_fpath):
         """Set target voice from audio file path, creating both S3Gen and VoiceEncoder embeddings."""
