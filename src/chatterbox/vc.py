@@ -23,7 +23,7 @@ from .models.voice_encoder import VoiceEncoder
 from .models.t3 import T3
 from .models.tokenizers.tokenizer import EnTokenizer
 from .models.t3.modules.cond_enc import T3Cond
-from .tts import punc_norm
+from .tts import punc_norm, ChatterboxTTS
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -582,7 +582,29 @@ class ChatterboxVC:
             wav_np = wav.squeeze(0).detach().cpu().numpy()
             watermarked = self.watermarker.apply_watermark(wav_np, sample_rate=self.sr)
         
-        result = torch.from_numpy(watermarked).unsqueeze(0)
+        # Convert to tensor and apply peak normalization to ~-1 dBFS
+        result = torch.from_numpy(watermarked).float().unsqueeze(0)
+        try:
+            pre_peak = float(result.abs().max().item())
+            pre_rms = float(torch.sqrt(torch.mean(result ** 2) + 1e-12).item())
+            pre_peak_db = 20.0 * np.log10(max(pre_peak, 1e-12))
+            pre_rms_db = 20.0 * np.log10(max(pre_rms, 1e-12))
+            logger.info(f"🔊 sample pre-peaknorm: peak={pre_peak_db:.2f} dBFS, rms={pre_rms_db:.2f} dBFS")
+
+            target_linear = float(10.0 ** (-1.0 / 20.0))  # ~ -1 dBFS
+            if pre_peak > 0:
+                scale = target_linear / pre_peak
+                result = result * scale
+                result = torch.clamp(result, -1.0, 1.0)
+
+            post_peak = float(result.abs().max().item())
+            post_rms = float(torch.sqrt(torch.mean(result ** 2) + 1e-12).item())
+            post_peak_db = 20.0 * np.log10(max(post_peak, 1e-12))
+            post_rms_db = 20.0 * np.log10(max(post_rms, 1e-12))
+            logger.info(f"🔊 sample post-peaknorm: peak={post_peak_db:.2f} dBFS, rms={post_rms_db:.2f} dBFS")
+        except Exception as _e_norm:
+            logger.warning(f"⚠️ Peak normalization skipped: {_e_norm}")
+ 
         logger.info(f"✅ ChatterboxVC.tts completed successfully")
         logger.info(f"  - Result tensor shape: {result.shape}")
         return result
@@ -849,6 +871,10 @@ class ChatterboxVC:
             try:
                 # Convert tensor to AudioSegment
                 audio_segment = self.tensor_to_audiosegment(audio_tensor, sample_rate)
+                try:
+                    logger.info(f"🔊 mp3 pre-export: peak={audio_segment.max_dBFS:.2f} dBFS, avg={audio_segment.dBFS:.2f} dBFS")
+                except Exception:
+                    pass
                 # Export to MP3 bytes
                 mp3_file = audio_segment.export(format="mp3", bitrate=bitrate)
                 # Read the bytes from the file object
@@ -1074,16 +1100,24 @@ class ChatterboxVC:
             
             # Step 3: Generate sample audio
             logger.info(f"  - Step 3: Generating sample audio...")
-            if sample_text:
-                # Generate custom sample text
-                logger.info(f"    - Using custom sample text: '{sample_text}'")
-                sample_audio = self.tts(sample_text)
-            else:
-                # Generate default sample text using voice profile
-                default_sample_text = f"Hello, this is the voice profile of {voice_name or 'this voice'}. I can be used to narrate whimsical stories and fairytales."
-                logger.info(f"    - Using default sample text: '{default_sample_text}'")
-                sample_audio = self.tts(default_sample_text)
-            logger.info(f"    - Sample audio generated, shape: {sample_audio.shape}")
+            # Use the TTS stitcher with the saved profile for consistent loudness
+            tts_model = ChatterboxTTS.from_pretrained(self.device)
+            sample_text_final = sample_text if sample_text else (
+                f"Hello, this is the voice profile of {voice_name or 'this voice'}. I can be used to narrate whimsical stories and fairytales."
+            )
+            audio_tensor, sr, _meta = tts_model.generate_long_text(
+                text=sample_text_final,
+                voice_profile_path=profile_local_path,
+                output_path="./temp_sample_preview.wav",
+                max_chars=400,
+                pause_ms=120,
+                temperature=0.8,
+                exaggeration=0.5,
+                cfg_weight=0.5,
+                pause_scale=1.0,
+            )
+            sample_audio = audio_tensor
+            logger.info(f"    - Sample audio generated via TTS, shape: {sample_audio.shape}")
 
             # Apply final loudness normalization to sample
             try:
@@ -1101,6 +1135,12 @@ class ChatterboxVC:
             with open(sample_local_path, 'wb') as f:
                 f.write(sample_mp3_bytes)
             logger.info(f"    - Sample audio saved: {sample_local_path}")
+            try:
+                import hashlib
+                _sha = hashlib.sha256(sample_mp3_bytes).hexdigest()[:16]
+                logger.info(f"    - Sample MP3 sha256[0:16]={_sha}, bytes={len(sample_mp3_bytes)}")
+            except Exception:
+                pass
             
             # Step 5: Recorded file handling is skipped for uploads; we honor the existing pointer
             recorded_audio_path_local = None

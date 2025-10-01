@@ -1292,12 +1292,6 @@ class AdvancedStitcher:
             # Export to file
             logger.info(f"🎼 Exporting stitched audio to: {output_path}")
             normalized_combined.export(output_path, format="wav")
-            try:
-                # Log file levels via pydub
-                seg = AudioSegment.from_wav(output_path)
-                _maybe_log_seg_levels("stitch export", seg)
-            except Exception:
-                pass
 
             # Final loudness normalization to target LUFS/TP/LRA
             logger.info("🎚️ Loudness normalization disabled; using original export")
@@ -1305,11 +1299,6 @@ class AdvancedStitcher:
 
             # Load back as tensor for return (use loudnorm output if available)
             audio_tensor, sample_rate = torchaudio.load(ln_path)
-            try:
-                pk, rm = _levels_from_tensor(audio_tensor)
-                logger.info(f"🔊 final tensor levels: peak={pk:.2f} dBFS, rms={rm:.2f} dBFS")
-            except Exception:
-                pass
             duration = float(audio_tensor.shape[-1]) / float(sample_rate)
 
             # Log stitching statistics
@@ -1937,12 +1926,6 @@ class ChatterboxTTS:
                 speech_tokens=speech_tokens,
                 ref_dict=self.conds.gen,
             )
-            # Diagnostics: levels after decode (tensor)
-            try:
-                peak_db, rms_db = _levels_from_tensor(wav)
-                logger.info(f"🔊 decode levels: peak={peak_db:.2f} dBFS, rms={rms_db:.2f} dBFS")
-            except Exception:
-                pass
             wav = wav.squeeze(0).detach().cpu().numpy()
         return torch.from_numpy(wav).unsqueeze(0)
 
@@ -2015,12 +1998,6 @@ class ChatterboxTTS:
                 speech_tokens=speech_tokens,
                 ref_dict=chunk_conditionals.gen,
             )
-            # Diagnostics: levels after decode (tensor)
-            try:
-                peak_db, rms_db = _levels_from_tensor(wav)
-                logger.info(f"🔊 decode levels: peak={peak_db:.2f} dBFS, rms={rms_db:.2f} dBFS")
-            except Exception:
-                pass
             wav = wav.squeeze(0).detach().cpu().numpy()
         return torch.from_numpy(wav).unsqueeze(0)
 
@@ -2046,11 +2023,11 @@ class ChatterboxTTS:
             logger.info(f"🎭 Found {len(story_break_positions)} story break(s) at positions: {story_break_positions}")
         
         # Step 2: Advanced text sanitization
-        logger.info(f"🧹 Applying advanced text sanitization to {len(text)} characters")
+        logger.debug(f"🧹 Applying advanced text sanitization to {len(text)} characters")
         sanitized_text = self.text_sanitizer.deep_clean(text)
         
         if len(sanitized_text) != len(text):
-            logger.info(f"🧹 Text sanitization: {len(text)} → {len(sanitized_text)} characters")
+            logger.debug(f"🧹 Text sanitization: {len(text)} → {len(sanitized_text)} characters")
         
         # Step 3: Smart chunking with optional lead-sentence split
         target_chars = int(max_chars * 0.8)  # Target 80% of max for better quality
@@ -2074,17 +2051,17 @@ class ChatterboxTTS:
             complexity_scores = [chunk.complexity_score for chunk in chunk_infos]
             avg_complexity = sum(complexity_scores) / len(complexity_scores)
             
-            logger.info(f"📊 Advanced Chunk Analysis:")
-            logger.info(f"   - Total chunks: {len(chunk_infos)}")
-            logger.info(f"   - Avg chars/chunk: {avg_chars:.1f}")
-            logger.info(f"   - Avg complexity: {avg_complexity:.1f}/10")
-            logger.info(f"   - Content distribution: {self.smart_chunker._get_content_type_distribution(chunk_infos)}")
+            logger.debug(f"📊 Advanced Chunk Analysis:")
+            logger.debug(f"   - Total chunks: {len(chunk_infos)}")
+            logger.debug(f"   - Avg chars/chunk: {avg_chars:.1f}")
+            logger.debug(f"   - Avg complexity: {avg_complexity:.1f}/10")
+            logger.debug(f"   - Content distribution: {self.smart_chunker._get_content_type_distribution(chunk_infos)}")
             
             # Sanitization impact analysis
             original_problematic = sum(1 for c in text if ord(c) > 127)
             sanitized_problematic = sum(1 for c in sanitized_text if ord(c) > 127)
             if original_problematic > sanitized_problematic:
-                logger.info(f"   - Problematic chars removed: {original_problematic - sanitized_problematic}")
+                logger.debug(f"   - Problematic chars removed: {original_problematic - sanitized_problematic}")
         
         return chunk_infos
     
