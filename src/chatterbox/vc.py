@@ -1109,12 +1109,12 @@ class ChatterboxVC:
                 text=sample_text_final,
                 voice_profile_path=profile_local_path,
                 output_path="./temp_sample_preview.wav",
-                max_chars=400,
-                pause_ms=120,
-                temperature=0.8,
-                exaggeration=0.5,
-                cfg_weight=0.5,
-                pause_scale=1.0,
+                max_chars=300,
+                pause_ms=90,
+                temperature=0.9,
+                exaggeration=0.7,
+                cfg_weight=0.45,
+                pause_scale=0.9,
             )
             sample_audio = audio_tensor
             logger.info(f"    - Sample audio generated via TTS, shape: {sample_audio.shape}")
