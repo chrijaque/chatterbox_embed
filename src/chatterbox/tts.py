@@ -2747,7 +2747,8 @@ class ChatterboxTTS:
                         "story_type": final_story_type,
                         "text_length": len(text),
                         "generation_time": time.time() - start_time,
-                        "audio_size": len(mp3_bytes)
+                        "audio_size": len(mp3_bytes),
+                        "duration": generation_metadata.get("duration_sec", 0)
                     }
                 )
                 if firebase_url:
@@ -2773,7 +2774,8 @@ class ChatterboxTTS:
                 "firebase_url": firebase_url,
                 "firebase_path": firebase_path,
                 "story_type": final_story_type,
-                "generation_time": generation_time
+                "generation_time": generation_time,
+                "duration": generation_metadata.get("duration_sec", 0)
             }
 
             # Firestore write for stories/{story_id}
