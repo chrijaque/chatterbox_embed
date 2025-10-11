@@ -2753,6 +2753,31 @@ class ChatterboxTTS:
                 )
                 if firebase_url:
                     logger.info(f"    - Uploaded successfully: {firebase_url}")
+                    # Write sibling JSON metadata file for reconciliation
+                    try:
+                        from google.cloud import storage as gcs
+                        storage_client = gcs.Client()
+                        bkt = storage_client.bucket("godnathistorie-a25fa.firebasestorage.app")
+                        meta_doc = {
+                            "story_id": story_id,
+                            "user_id": user_id,
+                            "voice_id": voice_id,
+                            "voice_name": voice_name,
+                            "audio_url": firebase_url,
+                            "storage_path": firebase_path,
+                            "language": language,
+                            "status": "success",
+                            "timestamp": datetime.utcnow().isoformat() + "Z",
+                            "metadata": {
+                                "generation_time": time.time() - start_time,
+                                "duration": generation_metadata.get("duration_sec", 0),
+                            },
+                        }
+                        json_blob = bkt.blob(firebase_path.rsplit('.', 1)[0] + '.json')
+                        import json as _json
+                        json_blob.upload_from_string(_json.dumps(meta_doc), content_type='application/json')
+                    except Exception as meta_json_e:
+                        logger.warning(f"⚠️ Failed to write sibling JSON metadata: {meta_json_e}")
                 else:
                     logger.warning("⚠️ Upload did not complete (object may already exist and overwrite is not permitted). Consider using unique filenames or granting delete permission.")
             except Exception as upload_error:
