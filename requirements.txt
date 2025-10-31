@@ -26,6 +26,7 @@ packaging
 
 # Optional but recommended for full functionality
 torchaudio[all]
+noisereduce
 
 # Development dependencies (optional)
 pytest
