@@ -40,6 +40,32 @@ except ImportError:
 REPO_ID = "ResembleAI/chatterbox"
 
 
+def resolve_bucket_name(bucket_name: Optional[str] = None, country_code: Optional[str] = None) -> str:
+    """
+    Normalize and resolve the target GCS bucket name for uploads.
+    Priority:
+      1) Explicit bucket_name (strip gs:// prefix)
+      2) AU if country_code == 'AU' and AU env present
+      3) US default
+    """
+    import os as _os
+    if bucket_name:
+        bn = str(bucket_name).replace('gs://', '')
+    elif (country_code or '').upper() == 'AU':
+        bn = _os.getenv('GCS_BUCKET_AU') or _os.getenv('FIREBASE_STORAGE_BUCKET_AU') or ''
+    else:
+        bn = _os.getenv('GCS_BUCKET_US') or _os.getenv('FIREBASE_STORAGE_BUCKET') or ''
+    bn = (bn or '').strip()
+    # Basic validation: forbid slashes and stray prefixes
+    if bn.startswith('gs://'):
+        bn = bn.replace('gs://', '')
+    if '/' in bn or '\\' in bn:
+        raise ValueError(f"Invalid bucket name (contains slash): {bn}")
+    if not bn:
+        raise ValueError("Bucket name could not be resolved from inputs or environment")
+    return bn
+
+
 def make_safe_slug(value: str) -> str:
     """Create a filesystem and URL-safe slug from a string."""
     if value is None:
@@ -78,12 +104,12 @@ def generate_unique_voice_id(voice_name: str, length: int = 8, max_attempts: int
         generate_unique_voice_id("christestclone") -> "voice_christestclone_A7b2K9x1"
     """
     from google.cloud import storage
-    
-    # Initialize Firebase client
+    # Resolve default bucket (US/AU) from env; uniqueness check is not region-specific to AU here
     try:
         storage_client = storage.Client()
-        bucket = storage_client.bucket("godnathistorie-a25fa.firebasestorage.app")
-        logger.info("✅ Firebase client initialized for uniqueness check")
+        resolved_bucket = resolve_bucket_name()
+        bucket = storage_client.bucket(resolved_bucket)
+        logger.info(f"✅ Firebase client initialized for uniqueness check (bucket={resolved_bucket})")
     except Exception as e:
         logger.warning(f"⚠️ Could not initialize Firebase client: {e}")
         logger.warning("⚠️ Proceeding without uniqueness check")
@@ -976,17 +1002,34 @@ class ChatterboxVC:
         """
         try:
             from google.cloud import storage
-            
+            # Resolve target bucket from metadata hints
+            bucket_hint = None
+            country_hint = None
+            try:
+                if metadata:
+                    bucket_hint = metadata.get("bucket_name") or metadata.get("bucket") or None
+                    country_hint = metadata.get("country_code") or metadata.get("region") or None
+            except Exception:
+                bucket_hint = None
+                country_hint = None
+
+            resolved_bucket = resolve_bucket_name(bucket_hint, country_hint)
+
+            # Basic destination path sanitization
+            dest_name = str(destination_blob_name or "").lstrip("/")
+            if ".." in dest_name or dest_name.startswith("/"):
+                raise ValueError(f"Invalid destination path: {destination_blob_name}")
+
             # Initialize Firebase storage client
             storage_client = storage.Client()
-            bucket = storage_client.bucket("godnathistorie-a25fa.firebasestorage.app")
+            bucket = storage_client.bucket(resolved_bucket)
             
             # Get file size for logging
             file_size = os.path.getsize(file_path)
-            logger.info(f"🔍 Starting Firebase upload: {destination_blob_name} ({file_size:,} bytes)")
+            logger.info(f"🔍 Starting Firebase upload: {dest_name} ({file_size:,} bytes) -> bucket={resolved_bucket}")
             
             # Create blob and upload directly from file (more efficient for large files)
-            blob = bucket.blob(destination_blob_name)
+            blob = bucket.blob(dest_name)
             
             # Set metadata if provided
             if metadata:
@@ -1015,14 +1058,19 @@ class ChatterboxVC:
             blob.make_public()
             
             public_url = blob.public_url
-            logger.info(f"✅ Uploaded to Firebase: {destination_blob_name} -> {public_url}")
+            logger.info(f"✅ Uploaded to Firebase: {resolved_bucket}/{dest_name} -> {public_url}")
             
             return public_url
             
         except Exception as e:
             logger.error(f"❌ Failed to upload to Firebase: {e}")
-            # Return the path as fallback
-            return f"https://storage.googleapis.com/godnathistorie-a25fa.firebasestorage.app/{destination_blob_name}"
+            # Return a bucket-qualified HTTPS URL as fallback
+            try:
+                fallback_bucket = resolved_bucket if 'resolved_bucket' in locals() else resolve_bucket_name(bucket_hint, country_hint)
+            except Exception:
+                fallback_bucket = "unknown-bucket"
+            safe_dest = str(destination_blob_name or "").lstrip("/")
+            return f"https://storage.googleapis.com/{fallback_bucket}/{safe_dest}"
 
     def create_voice_clone(self, audio_file_path: str, voice_id: str = None, voice_name: str = None, metadata: Dict = None, sample_text: str = None) -> Dict:
         """
@@ -1255,6 +1303,14 @@ class ChatterboxVC:
                     from google.cloud.firestore import SERVER_TIMESTAMP  # type: ignore
                     doc_id = voice_id
                     doc_ref = client.collection("voice_profiles").document(doc_id)
+                    # Region/bucket hints for downstream reads (optional)
+                    _bucket_hint = (metadata or {}).get("bucket_name") or (metadata or {}).get("bucket")
+                    _country_hint = (metadata or {}).get("country_code") or (metadata or {}).get("region")
+                    try:
+                        _resolved_bucket = resolve_bucket_name(_bucket_hint, _country_hint)
+                    except Exception:
+                        _resolved_bucket = None
+                    _base_public = f"https://storage.googleapis.com/{_resolved_bucket}" if _resolved_bucket else None
                     doc_ref.set({
                         "userId": (metadata or {}).get("user_id", ""),
                         "voiceId": voice_id,
@@ -1265,6 +1321,11 @@ class ChatterboxVC:
                         "samplePath": f"{base_path}/samples/{sample_filename}",
                         "profilePath": f"{base_path}/profiles/{profile_filename}",
                         "recordedPath": recorded_path_for_response,
+                        # Optional region/bucket info (helps migrations and read routing)
+                        "bucket": _resolved_bucket,
+                        "region": (_country_hint or "").upper() if _country_hint else None,
+                        "sampleUrl": f"{_base_public}/{base_path}/samples/{sample_filename}" if _base_public else None,
+                        "profileUrl": f"{_base_public}/{base_path}/profiles/{profile_filename}" if _base_public else None,
                         "createdAt": SERVER_TIMESTAMP,
                         "updatedAt": SERVER_TIMESTAMP,
                         "metadata": metadata or {},
