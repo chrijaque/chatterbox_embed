@@ -27,6 +27,7 @@ from .models.s3gen import S3GEN_SR, S3Gen, VoiceProfile
 from .models.tokenizers import EnTokenizer
 from .models.voice_encoder import VoiceEncoder
 from .models.t3.modules.cond_enc import T3Cond
+from .vc import resolve_bucket_name
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -2587,14 +2588,22 @@ class ChatterboxTTS:
         try:
             from google.cloud import storage
             
-            # Initialize Firebase storage client
+            # Resolve region-aware bucket from metadata hints
+            bucket_hint = (metadata or {}).get('bucket_name') if isinstance(metadata, dict) else None
+            country_hint = (metadata or {}).get('country_code') if isinstance(metadata, dict) else None
+            resolved_bucket = resolve_bucket_name(bucket_hint, country_hint)
+
+            # Basic destination path sanitization
+            dest_name = str(destination_blob_name or "").lstrip("/")
+
+            # Initialize Firebase storage client and bucket
             storage_client = storage.Client()
-            bucket = storage_client.bucket("godnathistorie-a25fa.firebasestorage.app")
+            bucket = storage_client.bucket(resolved_bucket)
             
-            logger.info(f"🔍 Starting Firebase upload: {destination_blob_name} ({len(data)} bytes)")
+            logger.info(f"🔍 Starting Firebase upload: {dest_name} ({len(data)} bytes) -> bucket={resolved_bucket}")
             
             # Create blob and upload (create-only to avoid requiring delete on overwrite)
-            blob = bucket.blob(destination_blob_name)
+            blob = bucket.blob(dest_name)
             
             # Set metadata if provided
             if metadata:
@@ -2616,9 +2625,9 @@ class ChatterboxTTS:
             except Exception as e:
                 logger.warning(f"⚠️ make_public failed (object may still be uploaded): {e}")
                 # Fallback to GCS URL (may still require auth depending on bucket policy)
-                public_url = f"https://storage.googleapis.com/{bucket.name}/{destination_blob_name}"
+                public_url = f"https://storage.googleapis.com/{bucket.name}/{dest_name}"
 
-            logger.info(f"✅ Uploaded to Firebase: {destination_blob_name} -> {public_url}")
+            logger.info(f"✅ Uploaded to Firebase: {resolved_bucket}/{dest_name} -> {public_url}")
             return public_url
             
         except Exception as e:
@@ -2678,10 +2687,23 @@ class ChatterboxTTS:
                 try:
                     from google.cloud import storage
                     storage_client = storage.Client()
-                    bucket = storage_client.bucket("godnathistorie-a25fa.firebasestorage.app")
-                    blob = bucket.blob(profile_path)
-                    profile_bytes = blob.download_as_bytes()
-                    logger.info("    - Voice profile downloaded from GCS")
+                    # Resolve primary region bucket from hints; fall back to US default if needed
+                    bucket_hint = (metadata or {}).get('bucket_name') if isinstance(metadata, dict) else None
+                    country_hint = (metadata or {}).get('country_code') if isinstance(metadata, dict) else None
+                    primary_bucket_name = resolve_bucket_name(bucket_hint, country_hint)
+                    us_bucket_name = resolve_bucket_name(None, None)
+
+                    def _download_from(bucket_name: str) -> bytes:
+                        b = storage_client.bucket(bucket_name)
+                        return b.blob(profile_path).download_as_bytes()
+
+                    try:
+                        profile_bytes = _download_from(primary_bucket_name)
+                        logger.info(f"    - Voice profile downloaded from GCS (bucket={primary_bucket_name})")
+                    except Exception as primary_err:
+                        logger.warning(f"    - Primary bucket download failed ({primary_bucket_name}), trying US fallback: {primary_err}")
+                        profile_bytes = _download_from(us_bucket_name)
+                        logger.info(f"    - Voice profile downloaded from GCS (US fallback bucket={us_bucket_name})")
                 except Exception as gcs_e:
                     logger.error(f"❌ Failed to download profile from GCS: {gcs_e}")
                     raise
@@ -2726,11 +2748,11 @@ class ChatterboxTTS:
                 logger.warning(f"Invalid story_type '{final_story_type}', defaulting to 'user'")
                 final_story_type = 'user'
             
-            # Generate Firebase path based on story_type and language with unique suffix to avoid collisions
+            # Generate Firebase path under language/user/{user_id} with unique suffix to avoid collisions
             import random
             suffix = ''.join(random.choices('abcdefghijklmnopqrstuvwxyz0123456789', k=4))
             unique_filename = f"{voice_id}_{suffix}.mp3"
-            firebase_path = f"audio/stories/{language}/{final_story_type}/{unique_filename}"
+            firebase_path = f"audio/stories/{language}/user/{user_id}/{unique_filename}"
             logger.info(f"    - Firebase path: {firebase_path}")
             logger.info(f"    - Story type: {final_story_type}")
             
@@ -2741,6 +2763,8 @@ class ChatterboxTTS:
                     destination_blob_name=firebase_path,
                     content_type="audio/mpeg",
                     metadata={
+                        "user_id": user_id,
+                        "story_id": story_id,
                         "voice_id": voice_id,
                         "voice_name": voice_name,
                         "language": language,
@@ -2757,7 +2781,11 @@ class ChatterboxTTS:
                     try:
                         from google.cloud import storage as gcs
                         storage_client = gcs.Client()
-                        bkt = storage_client.bucket("godnathistorie-a25fa.firebasestorage.app")
+                        # Use the same primary bucket as audio upload
+                        bucket_hint = (metadata or {}).get('bucket_name') if isinstance(metadata, dict) else None
+                        country_hint = (metadata or {}).get('country_code') if isinstance(metadata, dict) else None
+                        primary_bucket_name = resolve_bucket_name(bucket_hint, country_hint)
+                        bkt = storage_client.bucket(primary_bucket_name)
                         meta_doc = {
                             "story_id": story_id,
                             "user_id": user_id,
