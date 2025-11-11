@@ -44,9 +44,13 @@ def resolve_bucket_name(bucket_name: Optional[str] = None, country_code: Optiona
     """
     Normalize and resolve the target GCS bucket name for uploads.
     Priority:
-      1) Explicit bucket_name (strip gs:// prefix)
+      1) Explicit bucket_name (strip gs:// prefix and Firebase Storage domain suffixes)
       2) AU if country_code == 'AU' and AU env present
       3) US default
+    
+    Normalizes Firebase Storage domain formats to actual GCS bucket names:
+    - godnathistorie-a25fa.firebasestorage.app -> godnathistorie-a25fa
+    - godnathistorie-a25fa.appspot.com -> godnathistorie-a25fa
     """
     import os as _os
     if bucket_name:
@@ -59,6 +63,17 @@ def resolve_bucket_name(bucket_name: Optional[str] = None, country_code: Optiona
     # Basic validation: forbid slashes and stray prefixes
     if bn.startswith('gs://'):
         bn = bn.replace('gs://', '')
+    # Strip protocol if present
+    if bn.startswith('https://') or bn.startswith('http://'):
+        bn = bn.split('://', 1)[1]
+    # If URL-like, take host part only
+    if '/' in bn:
+        bn = bn.split('/')[0]
+    # Strip Firebase Storage domain suffixes (GCS client needs actual bucket name)
+    if bn.endswith('.firebasestorage.app'):
+        bn = bn.replace('.firebasestorage.app', '')
+    if bn.endswith('.appspot.com'):
+        bn = bn.replace('.appspot.com', '')
     if '/' in bn or '\\' in bn:
         raise ValueError(f"Invalid bucket name (contains slash): {bn}")
     if not bn:

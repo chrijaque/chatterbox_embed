@@ -2758,6 +2758,9 @@ class ChatterboxTTS:
             
             # Upload to Firebase
             try:
+                # Extract bucket_name and country_code from metadata for region-aware upload
+                bucket_hint = (metadata or {}).get('bucket_name') if isinstance(metadata, dict) else None
+                country_hint = (metadata or {}).get('country_code') if isinstance(metadata, dict) else None
                 firebase_url = self.upload_to_firebase(
                     data=mp3_bytes,
                     destination_blob_name=firebase_path,
@@ -2772,7 +2775,10 @@ class ChatterboxTTS:
                         "text_length": len(text),
                         "generation_time": time.time() - start_time,
                         "audio_size": len(mp3_bytes),
-                        "duration": generation_metadata.get("duration_sec", 0)
+                        "duration": generation_metadata.get("duration_sec", 0),
+                        # Include bucket routing hints for region-aware upload
+                        "bucket_name": bucket_hint,
+                        "country_code": country_hint,
                     }
                 )
                 if firebase_url:
