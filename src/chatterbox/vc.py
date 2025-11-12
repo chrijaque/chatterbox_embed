@@ -1263,6 +1263,9 @@ class ChatterboxVC:
                 "language": str((base_meta or {}).get("language", (metadata or {}).get("language", "en"))),
                 "is_kids_voice": str(bool((metadata or {}).get("is_kids_voice", False))).lower(),
                 "model_type": str((metadata or {}).get("model_type", "chatterbox")),
+                # Include bucket_name and country_code for region-aware bucket resolution
+                "bucket_name": (metadata or {}).get("bucket_name") or (base_meta or {}).get("bucket_name"),
+                "country_code": (metadata or {}).get("country_code") or (base_meta or {}).get("country_code"),
             }
 
             # Upload sample audio to exact path with exact metadata
