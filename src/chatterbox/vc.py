@@ -23,7 +23,7 @@ from .models.voice_encoder import VoiceEncoder
 from .models.t3 import T3
 from .models.tokenizers.tokenizer import EnTokenizer
 from .models.t3.modules.cond_enc import T3Cond
-from .tts import punc_norm, ChatterboxTTS
+# Note: punc_norm and ChatterboxTTS are imported lazily inside methods to avoid circular import
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -575,6 +575,8 @@ class ChatterboxVC:
             
             # Step 2: Process text and tokenize
             logger.info(f"  - Processing and tokenizing text...")
+            # Lazy import to avoid circular dependency
+            from .tts import punc_norm
             text = punc_norm(text)
             text_tokens = self.tokenizer.text_to_tokens(text).to(self.device)
 
@@ -1164,6 +1166,8 @@ class ChatterboxVC:
             # Step 3: Generate sample audio
             logger.info(f"  - Step 3: Generating sample audio...")
             # Use the TTS stitcher with the saved profile for consistent loudness
+            # Lazy import to avoid circular dependency
+            from .tts import ChatterboxTTS
             tts_model = ChatterboxTTS.from_pretrained(self.device)
             sample_text_final = sample_text if sample_text else (
                 f"Hello, this is the voice profile of {voice_name or 'this voice'}. I can be used to narrate whimsical stories and fairytales."

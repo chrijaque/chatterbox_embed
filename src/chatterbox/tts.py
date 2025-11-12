@@ -27,7 +27,7 @@ from .models.s3gen import S3GEN_SR, S3Gen, VoiceProfile
 from .models.tokenizers import EnTokenizer
 from .models.voice_encoder import VoiceEncoder
 from .models.t3.modules.cond_enc import T3Cond
-from .vc import resolve_bucket_name
+# Note: resolve_bucket_name is imported lazily inside methods to avoid circular import
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -2587,6 +2587,8 @@ class ChatterboxTTS:
         """
         try:
             from google.cloud import storage
+            # Lazy import to avoid circular dependency
+            from .vc import resolve_bucket_name
             
             # Resolve region-aware bucket from metadata hints
             bucket_hint = (metadata or {}).get('bucket_name') if isinstance(metadata, dict) else None
@@ -2686,6 +2688,8 @@ class ChatterboxTTS:
                 logger.info(f"  - Step 1: Loading voice profile from GCS path: {profile_path}")
                 try:
                     from google.cloud import storage
+                    # Lazy import to avoid circular dependency
+                    from .vc import resolve_bucket_name
                     storage_client = storage.Client()
                     # Resolve primary region bucket from hints; fall back to US default if needed
                     bucket_hint = (metadata or {}).get('bucket_name') if isinstance(metadata, dict) else None
@@ -2786,6 +2790,8 @@ class ChatterboxTTS:
                     # Write sibling JSON metadata file for reconciliation
                     try:
                         from google.cloud import storage as gcs
+                        # Lazy import to avoid circular dependency
+                        from .vc import resolve_bucket_name
                         storage_client = gcs.Client()
                         # Use the same primary bucket as audio upload
                         bucket_hint = (metadata or {}).get('bucket_name') if isinstance(metadata, dict) else None
