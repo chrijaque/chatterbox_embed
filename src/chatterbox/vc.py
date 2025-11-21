@@ -42,7 +42,7 @@ REPO_ID = "ResembleAI/chatterbox"
 
 def resolve_bucket_name(bucket_name: Optional[str] = None, country_code: Optional[str] = None) -> str:
     """
-    Normalize and resolve the target GCS bucket name for uploads.
+    Normalize and resolve the target bucket name for uploads (GCS or R2).
     Priority:
       1) Explicit bucket_name (strip gs:// prefix and Firebase Storage domain suffixes)
       2) AU if country_code == 'AU' and AU env present
@@ -51,10 +51,13 @@ def resolve_bucket_name(bucket_name: Optional[str] = None, country_code: Optiona
     Normalizes Firebase Storage domain formats to actual GCS bucket names:
     - godnathistorie-a25fa.firebasestorage.app -> godnathistorie-a25fa
     - godnathistorie-a25fa.appspot.com -> godnathistorie-a25fa
+    
+    Recognizes R2 bucket names:
+    - daezend-public-content -> daezend-public-content (R2 bucket)
     """
     import os as _os
     if bucket_name:
-        bn = str(bucket_name).replace('gs://', '')
+        bn = str(bucket_name).replace('gs://', '').replace('r2://', '')
     elif (country_code or '').upper() == 'AU':
         bn = _os.getenv('GCS_BUCKET_AU') or _os.getenv('FIREBASE_STORAGE_BUCKET_AU') or ''
     else:
@@ -63,6 +66,8 @@ def resolve_bucket_name(bucket_name: Optional[str] = None, country_code: Optiona
     # Basic validation: forbid slashes and stray prefixes
     if bn.startswith('gs://'):
         bn = bn.replace('gs://', '')
+    if bn.startswith('r2://'):
+        bn = bn.replace('r2://', '')
     # Strip protocol if present
     if bn.startswith('https://') or bn.startswith('http://'):
         bn = bn.split('://', 1)[1]
@@ -79,6 +84,10 @@ def resolve_bucket_name(bucket_name: Optional[str] = None, country_code: Optiona
     if not bn:
         raise ValueError("Bucket name could not be resolved from inputs or environment")
     return bn
+
+def is_r2_bucket(bucket_name: str) -> bool:
+    """Check if bucket name indicates R2 storage."""
+    return bucket_name == 'daezend-public-content' or bucket_name.startswith('r2://')
 
 
 def make_safe_slug(value: str) -> str:

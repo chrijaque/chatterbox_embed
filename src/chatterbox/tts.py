@@ -2577,18 +2577,18 @@ class ChatterboxTTS:
 
     def upload_to_firebase(self, data: bytes, destination_blob_name: str, content_type: str = "application/octet-stream", metadata: dict = None) -> Optional[str]:
         """
-        Upload data directly to Firebase Storage with metadata
+        Upload data directly to Firebase Storage or R2 with metadata.
+        Automatically detects R2 bucket and routes accordingly.
         
         :param data: Binary data to upload
-        :param destination_blob_name: Destination path in Firebase
+        :param destination_blob_name: Destination path in Firebase/R2
         :param content_type: MIME type of the file
         :param metadata: Optional metadata to store with the file
         :return: Public URL
         """
         try:
-            from google.cloud import storage
             # Lazy import to avoid circular dependency
-            from .vc import resolve_bucket_name
+            from .vc import resolve_bucket_name, is_r2_bucket
             
             # Resolve region-aware bucket from metadata hints
             bucket_hint = (metadata or {}).get('bucket_name') if isinstance(metadata, dict) else None
@@ -2598,6 +2598,16 @@ class ChatterboxTTS:
             # Basic destination path sanitization
             dest_name = str(destination_blob_name or "").lstrip("/")
 
+            # Check if this is an R2 bucket
+            if is_r2_bucket(resolved_bucket):
+                logger.info(f"🔍 Using R2 upload for bucket: {resolved_bucket}")
+                return self._upload_to_r2(data, dest_name, content_type, metadata)
+            
+            # Otherwise use Firebase/GCS
+            from google.cloud import storage
+            
+            logger.info(f"🔍 Using Firebase/GCS upload for bucket: {resolved_bucket}")
+            
             # Initialize Firebase storage client and bucket
             storage_client = storage.Client()
             bucket = storage_client.bucket(resolved_bucket)
@@ -2633,7 +2643,121 @@ class ChatterboxTTS:
             return public_url
             
         except Exception as e:
-            logger.error(f"❌ Failed to upload to Firebase: {e}")
+            logger.error(f"❌ Failed to upload: {e}")
+            return None
+    
+    def _upload_to_r2(self, data: bytes, destination_key: str, content_type: str = "application/octet-stream", metadata: dict = None) -> Optional[str]:
+        """
+        Upload data to Cloudflare R2 using boto3 S3 client.
+        
+        :param data: Binary data to upload
+        :param destination_key: Destination key/path in R2
+        :param content_type: MIME type of the file
+        :param metadata: Optional metadata dict (will be stored as R2 metadata)
+        :return: Public URL or None if failed
+        """
+        try:
+            import boto3
+            import os
+            
+            # Get R2 credentials from environment
+            r2_account_id = os.getenv('R2_ACCOUNT_ID')
+            r2_access_key_id = os.getenv('R2_ACCESS_KEY_ID')
+            r2_secret_access_key = os.getenv('R2_SECRET_ACCESS_KEY')
+            r2_endpoint = os.getenv('R2_ENDPOINT')
+            r2_bucket_name = os.getenv('R2_BUCKET_NAME', 'daezend-public-content')
+            r2_public_url = os.getenv('NEXT_PUBLIC_R2_PUBLIC_URL') or os.getenv('R2_PUBLIC_URL')
+            
+            if not all([r2_account_id, r2_access_key_id, r2_secret_access_key, r2_endpoint]):
+                logger.error("❌ R2 credentials not configured")
+                return None
+            
+            # Create S3 client for R2
+            s3_client = boto3.client(
+                's3',
+                endpoint_url=r2_endpoint,
+                aws_access_key_id=r2_access_key_id,
+                aws_secret_access_key=r2_secret_access_key,
+                region_name='auto'
+            )
+            
+            # Prepare metadata for R2
+            extra_args = {
+                'ContentType': content_type,
+            }
+            if metadata:
+                # R2 metadata must be strings
+                extra_args['Metadata'] = {str(k): str(v) for k, v in metadata.items()}
+            
+            # Upload to R2
+            s3_client.put_object(
+                Bucket=r2_bucket_name,
+                Key=destination_key,
+                Body=data,
+                **extra_args
+            )
+            
+            logger.info(f"✅ Uploaded to R2: {destination_key} ({len(data)} bytes)")
+            
+            # Return public URL if available
+            if r2_public_url:
+                public_url = f"{r2_public_url.rstrip('/')}/{destination_key}"
+                return public_url
+            
+            # Fallback: return R2 path
+            return destination_key
+            
+        except Exception as e:
+            logger.error(f"❌ R2 upload failed: {e}")
+            import traceback
+            logger.error(f"❌ R2 upload traceback: {traceback.format_exc()}")
+            return None
+    
+    def _download_from_r2(self, source_key: str) -> Optional[bytes]:
+        """
+        Download data from Cloudflare R2 using boto3 S3 client.
+        
+        :param source_key: Source key/path in R2
+        :return: Binary data or None if failed
+        """
+        try:
+            import boto3
+            import os
+            
+            # Get R2 credentials from environment
+            r2_account_id = os.getenv('R2_ACCOUNT_ID')
+            r2_access_key_id = os.getenv('R2_ACCESS_KEY_ID')
+            r2_secret_access_key = os.getenv('R2_SECRET_ACCESS_KEY')
+            r2_endpoint = os.getenv('R2_ENDPOINT')
+            r2_bucket_name = os.getenv('R2_BUCKET_NAME', 'daezend-public-content')
+            
+            if not all([r2_account_id, r2_access_key_id, r2_secret_access_key, r2_endpoint]):
+                logger.error("❌ R2 credentials not configured")
+                return None
+            
+            # Create S3 client for R2
+            s3_client = boto3.client(
+                's3',
+                endpoint_url=r2_endpoint,
+                aws_access_key_id=r2_access_key_id,
+                aws_secret_access_key=r2_secret_access_key,
+                region_name='auto'
+            )
+            
+            # Download from R2
+            response = s3_client.get_object(
+                Bucket=r2_bucket_name,
+                Key=source_key
+            )
+            
+            data = response['Body'].read()
+            logger.info(f"✅ Downloaded from R2: {source_key} ({len(data)} bytes)")
+            return data
+            
+        except Exception as e:
+            logger.error(f"❌ R2 download failed: {e}")
+            import traceback
+            logger.error(f"❌ R2 download traceback: {traceback.format_exc()}")
             return None
 
     def generate_tts_story(self, text: str, voice_id: str, profile_base64: str = "", 
@@ -2680,36 +2804,49 @@ class ChatterboxTTS:
         logger.info(f"  - metadata: {metadata}")
         
         try:
-            # Step 1: Load voice profile from base64 or GCS path
+            # Step 1: Load voice profile from base64 or storage path (GCS/R2)
             if profile_base64:
                 logger.info(f"  - Step 1: Loading voice profile from base64...")
                 profile_bytes = base64.b64decode(profile_base64)
             elif profile_path:
-                logger.info(f"  - Step 1: Loading voice profile from GCS path: {profile_path}")
+                logger.info(f"  - Step 1: Loading voice profile from storage path: {profile_path}")
                 try:
-                    from google.cloud import storage
                     # Lazy import to avoid circular dependency
-                    from .vc import resolve_bucket_name
-                    storage_client = storage.Client()
-                    # Resolve primary region bucket from hints; fall back to US default if needed
+                    from .vc import resolve_bucket_name, is_r2_bucket
+                    
+                    # Resolve bucket from metadata hints
                     bucket_hint = (metadata or {}).get('bucket_name') if isinstance(metadata, dict) else None
                     country_hint = (metadata or {}).get('country_code') if isinstance(metadata, dict) else None
-                    primary_bucket_name = resolve_bucket_name(bucket_hint, country_hint)
-                    us_bucket_name = resolve_bucket_name(None, None)
+                    resolved_bucket = resolve_bucket_name(bucket_hint, country_hint)
+                    
+                    # Check if this is an R2 bucket
+                    if is_r2_bucket(resolved_bucket):
+                        logger.info(f"    - Using R2 download (bucket={resolved_bucket})")
+                        profile_bytes = self._download_from_r2(profile_path)
+                        if not profile_bytes:
+                            raise ValueError(f"Failed to download profile from R2: {profile_path}")
+                        logger.info(f"    - Voice profile downloaded from R2 (bucket={resolved_bucket})")
+                    else:
+                        # Use GCS download
+                        from google.cloud import storage
+                        storage_client = storage.Client()
+                        # Resolve primary region bucket from hints; fall back to US default if needed
+                        primary_bucket_name = resolved_bucket
+                        us_bucket_name = resolve_bucket_name(None, None)
 
-                    def _download_from(bucket_name: str) -> bytes:
-                        b = storage_client.bucket(bucket_name)
-                        return b.blob(profile_path).download_as_bytes()
+                        def _download_from(bucket_name: str) -> bytes:
+                            b = storage_client.bucket(bucket_name)
+                            return b.blob(profile_path).download_as_bytes()
 
-                    try:
-                        profile_bytes = _download_from(primary_bucket_name)
-                        logger.info(f"    - Voice profile downloaded from GCS (bucket={primary_bucket_name})")
-                    except Exception as primary_err:
-                        logger.warning(f"    - Primary bucket download failed ({primary_bucket_name}), trying US fallback: {primary_err}")
-                        profile_bytes = _download_from(us_bucket_name)
-                        logger.info(f"    - Voice profile downloaded from GCS (US fallback bucket={us_bucket_name})")
-                except Exception as gcs_e:
-                    logger.error(f"❌ Failed to download profile from GCS: {gcs_e}")
+                        try:
+                            profile_bytes = _download_from(primary_bucket_name)
+                            logger.info(f"    - Voice profile downloaded from GCS (bucket={primary_bucket_name})")
+                        except Exception as primary_err:
+                            logger.warning(f"    - Primary bucket download failed ({primary_bucket_name}), trying US fallback: {primary_err}")
+                            profile_bytes = _download_from(us_bucket_name)
+                            logger.info(f"    - Voice profile downloaded from GCS (US fallback bucket={us_bucket_name})")
+                except Exception as storage_e:
+                    logger.error(f"❌ Failed to download profile from storage: {storage_e}")
                     raise
             else:
                 raise ValueError("Either profile_base64 or profile_path must be provided")
@@ -2739,8 +2876,8 @@ class ChatterboxTTS:
             logger.info(f"  - Step 3: Converting to MP3...")
             mp3_bytes = self.tensor_to_mp3_bytes(audio_tensor, sample_rate, "96k")
             
-            # Step 4: Upload to Firebase Storage
-            logger.info(f"  - Step 4: Uploading to Firebase Storage...")
+            # Step 4: Upload directly to R2 (skip Firebase Storage)
+            logger.info(f"  - Step 4: Uploading directly to R2...")
             
             # Extract story_type from metadata or use direct parameter
             final_story_type = story_type  # Start with direct parameter
@@ -2752,24 +2889,44 @@ class ChatterboxTTS:
                 logger.warning(f"Invalid story_type '{final_story_type}', defaulting to 'user'")
                 final_story_type = 'user'
             
-            # Generate Firebase path under language/user/{user_id} with unique suffix to avoid collisions
-            import random
-            suffix = ''.join(random.choices('abcdefghijklmnopqrstuvwxyz0123456789', k=4))
-            unique_filename = f"{voice_id}_{suffix}.mp3"
-            firebase_path = f"audio/stories/{language}/user/{user_id}/{unique_filename}"
-            logger.info(f"    - Firebase path: {firebase_path}")
-            logger.info(f"    - Story type: {final_story_type}")
+            # Determine storage path based on admin generation flag
+            is_admin_gen = (metadata or {}).get('is_admin_generation', False) if isinstance(metadata, dict) else False
+            storage_path_hint = (metadata or {}).get('storage_path', '') if isinstance(metadata, dict) else ''
             
-            # Upload to Firebase
+            if is_admin_gen and storage_path_hint:
+                # Admin generation: use provided storage path (R2)
+                import random
+                suffix = ''.join(random.choices('abcdefghijklmnopqrstuvwxyz0123456789', k=4))
+                unique_filename = f"{voice_id}_{suffix}.mp3"
+                r2_path = f"{storage_path_hint.rstrip('/')}/{unique_filename}"
+                version_id = suffix  # Use suffix as version_id for admin generation
+            else:
+                # Regular user story generation: use new R2 path structure
+                # Generate versionId (timestamp-based)
+                version_id = f"{int(time.time() * 1000)}"
+                
+                # Validate required fields for R2 path
+                if not user_id or not story_id or not language:
+                    raise ValueError(f"Missing required fields for R2 path: user_id={user_id}, story_id={story_id}, language={language}")
+                
+                # Use new R2 path structure: private/users/{userId}/stories/audio/{language}/{storyId}/{versionId}.mp3
+                r2_path = f"private/users/{user_id}/stories/audio/{language}/{story_id}/{version_id}.mp3"
+            
+            logger.info(f"    - R2 path: {r2_path}")
+            logger.info(f"    - Story type: {final_story_type}")
+            logger.info(f"    - Is admin generation: {is_admin_gen}")
+            logger.info(f"    - Version ID: {version_id}")
+            
+            # Upload directly to R2
+            r2_url = None
             try:
-                # Extract bucket_name and country_code from metadata for region-aware upload
-                bucket_hint = (metadata or {}).get('bucket_name') if isinstance(metadata, dict) else None
-                country_hint = (metadata or {}).get('country_code') if isinstance(metadata, dict) else None
-                firebase_url = self.upload_to_firebase(
+                # Always use R2 bucket for user stories
+                r2_url = self.upload_to_firebase(
                     data=mp3_bytes,
-                    destination_blob_name=firebase_path,
+                    destination_blob_name=r2_path,
                     content_type="audio/mpeg",
                     metadata={
+                        "bucket_name": "daezend-public-content",  # Always R2 for user stories
                         "user_id": user_id,
                         "story_id": story_id,
                         "voice_id": voice_id,
@@ -2780,49 +2937,18 @@ class ChatterboxTTS:
                         "generation_time": time.time() - start_time,
                         "audio_size": len(mp3_bytes),
                         "duration": generation_metadata.get("duration_sec", 0),
-                        # Include bucket routing hints for region-aware upload
-                        "bucket_name": bucket_hint,
-                        "country_code": country_hint,
                     }
                 )
-                if firebase_url:
-                    logger.info(f"    - Uploaded successfully: {firebase_url}")
-                    # Write sibling JSON metadata file for reconciliation
-                    try:
-                        from google.cloud import storage as gcs
-                        # Lazy import to avoid circular dependency
-                        from .vc import resolve_bucket_name
-                        storage_client = gcs.Client()
-                        # Use the same primary bucket as audio upload
-                        bucket_hint = (metadata or {}).get('bucket_name') if isinstance(metadata, dict) else None
-                        country_hint = (metadata or {}).get('country_code') if isinstance(metadata, dict) else None
-                        primary_bucket_name = resolve_bucket_name(bucket_hint, country_hint)
-                        bkt = storage_client.bucket(primary_bucket_name)
-                        meta_doc = {
-                            "story_id": story_id,
-                            "user_id": user_id,
-                            "voice_id": voice_id,
-                            "voice_name": voice_name,
-                            "audio_url": firebase_url,
-                            "storage_path": firebase_path,
-                            "language": language,
-                            "status": "success",
-                            "timestamp": datetime.utcnow().isoformat() + "Z",
-                            "metadata": {
-                                "generation_time": time.time() - start_time,
-                                "duration": generation_metadata.get("duration_sec", 0),
-                            },
-                        }
-                        json_blob = bkt.blob(firebase_path.rsplit('.', 1)[0] + '.json')
-                        import json as _json
-                        json_blob.upload_from_string(_json.dumps(meta_doc), content_type='application/json')
-                    except Exception as meta_json_e:
-                        logger.warning(f"⚠️ Failed to write sibling JSON metadata: {meta_json_e}")
+                if r2_url:
+                    logger.info(f"    - Uploaded successfully to R2: {r2_url}")
                 else:
-                    logger.warning("⚠️ Upload did not complete (object may already exist and overwrite is not permitted). Consider using unique filenames or granting delete permission.")
+                    logger.warning("⚠️ R2 upload did not return URL")
             except Exception as upload_error:
-                logger.error(f"❌ Firebase upload failed: {upload_error}")
-                firebase_url = None
+                logger.error(f"❌ R2 upload failed: {upload_error}")
+                import traceback
+                logger.error(f"❌ R2 upload traceback: {traceback.format_exc()}")
+                r2_url = None
+                raise  # Re-raise to fail the generation
             
             # Convert to base64
             audio_base64 = base64.b64encode(mp3_bytes).decode('utf-8')
@@ -2832,12 +2958,16 @@ class ChatterboxTTS:
             
             generation_time = time.time() - start_time
             
-            # Return result with Firebase URL
+            # Return result with R2 URL and path (no Firebase Storage references)
             result = {
                 "status": "success",
                 "audio_data": audio_base64,
-                "firebase_url": firebase_url,
-                "firebase_path": firebase_path,
+                "firebase_url": r2_url,  # R2 public URL (for backward compatibility)
+                "firebase_path": r2_path,  # R2 path (for backward compatibility)
+                "r2_path": r2_path,  # Explicit R2 path for callback validation
+                "audio_url": r2_url,  # Alias for compatibility
+                "storage_path": r2_path,  # Alias for compatibility
+                "version_id": version_id,
                 "story_type": final_story_type,
                 "generation_time": generation_time,
                 "duration": generation_metadata.get("duration_sec", 0)
@@ -2851,13 +2981,13 @@ class ChatterboxTTS:
                 if story_id:
                     doc = client.collection("stories").document(story_id)
                     # Build new audio version entry
-                    version_id = str(int(time.time() * 1000))
+                    # Use version_id from path generation (already generated above)
                     new_version = {
                         "id": version_id,
                         "voiceId": voice_id,
                         "voiceName": voice_name,
-                        "audioUrl": firebase_url or "",
-                        "url": firebase_url or "",
+                        "audioUrl": r2_url or "",
+                        "url": r2_url or "",
                         "createdAt": SERVER_TIMESTAMP,
                         "updatedAt": SERVER_TIMESTAMP,
                         "service": "chatterbox",
@@ -2866,12 +2996,13 @@ class ChatterboxTTS:
                             "size": len(mp3_bytes),
                             "duration": generation_metadata.get("duration_sec", 0) if 'generation_metadata' in locals() else 0,
                             "voiceName": voice_name,
+                            "r2Path": r2_path,  # Store R2 path in metadata
                         },
                     }
                     # Update atomically: set status and push new version
                     doc.set({
                         "audioStatus": "ready",
-                        "audioUrl": firebase_url or "",
+                        "audioUrl": r2_url or "",
                         "updatedAt": SERVER_TIMESTAMP,
                     }, merge=True)
                     # Firestore array union append (fallback to read-modify-write if needed)
