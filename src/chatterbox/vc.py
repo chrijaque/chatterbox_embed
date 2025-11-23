@@ -1018,16 +1018,16 @@ class ChatterboxVC:
     # ------------------------------------------------------------------
     def upload_to_firebase(self, file_path: str, destination_blob_name: str, content_type: str = "application/octet-stream", metadata: dict = None) -> str:
         """
-        Upload a file to Firebase Storage
+        Upload a file to Firebase Storage or R2 with metadata.
+        Automatically detects R2 bucket and routes accordingly.
         
         :param file_path: Path to the file to upload
-        :param destination_blob_name: Destination path in Firebase
+        :param destination_blob_name: Destination path in Firebase/R2
         :param content_type: MIME type of the file
         :param metadata: Optional metadata to store with the file
         :return: Public URL
         """
         try:
-            from google.cloud import storage
             # Resolve target bucket from metadata hints
             bucket_hint = None
             country_hint = None
@@ -1046,6 +1046,19 @@ class ChatterboxVC:
             if ".." in dest_name or dest_name.startswith("/"):
                 raise ValueError(f"Invalid destination path: {destination_blob_name}")
 
+            # Check if this is an R2 bucket
+            if is_r2_bucket(resolved_bucket):
+                logger.info(f"🔍 Using R2 upload for bucket: {resolved_bucket}")
+                # Read file and upload to R2
+                with open(file_path, 'rb') as f:
+                    file_data = f.read()
+                return self._upload_to_r2(file_data, dest_name, content_type, metadata)
+            
+            # Otherwise use Firebase/GCS
+            from google.cloud import storage
+            
+            logger.info(f"🔍 Using Firebase/GCS upload for bucket: {resolved_bucket}")
+            
             # Initialize Firebase storage client
             storage_client = storage.Client()
             bucket = storage_client.bucket(resolved_bucket)
@@ -1089,7 +1102,9 @@ class ChatterboxVC:
             return public_url
             
         except Exception as e:
-            logger.error(f"❌ Failed to upload to Firebase: {e}")
+            logger.error(f"❌ Failed to upload: {e}")
+            import traceback
+            logger.error(f"❌ Upload traceback: {traceback.format_exc()}")
             # Return a bucket-qualified HTTPS URL as fallback
             try:
                 fallback_bucket = resolved_bucket if 'resolved_bucket' in locals() else resolve_bucket_name(bucket_hint, country_hint)
@@ -1097,6 +1112,73 @@ class ChatterboxVC:
                 fallback_bucket = "unknown-bucket"
             safe_dest = str(destination_blob_name or "").lstrip("/")
             return f"https://storage.googleapis.com/{fallback_bucket}/{safe_dest}"
+    
+    def _upload_to_r2(self, data: bytes, destination_key: str, content_type: str = "application/octet-stream", metadata: dict = None) -> Optional[str]:
+        """
+        Upload data to Cloudflare R2 using boto3 S3 client.
+        
+        :param data: Binary data to upload
+        :param destination_key: Destination key/path in R2
+        :param content_type: MIME type of the file
+        :param metadata: Optional metadata dict (will be stored as R2 metadata)
+        :return: Public URL or None if failed
+        """
+        try:
+            import boto3
+            import os
+            
+            # Get R2 credentials from environment
+            r2_account_id = os.getenv('R2_ACCOUNT_ID')
+            r2_access_key_id = os.getenv('R2_ACCESS_KEY_ID')
+            r2_secret_access_key = os.getenv('R2_SECRET_ACCESS_KEY')
+            r2_endpoint = os.getenv('R2_ENDPOINT')
+            r2_bucket_name = os.getenv('R2_BUCKET_NAME', 'daezend-public-content')
+            r2_public_url = os.getenv('NEXT_PUBLIC_R2_PUBLIC_URL') or os.getenv('R2_PUBLIC_URL')
+            
+            if not all([r2_account_id, r2_access_key_id, r2_secret_access_key, r2_endpoint]):
+                logger.error("❌ R2 credentials not configured")
+                return None
+            
+            # Create S3 client for R2
+            s3_client = boto3.client(
+                's3',
+                endpoint_url=r2_endpoint,
+                aws_access_key_id=r2_access_key_id,
+                aws_secret_access_key=r2_secret_access_key,
+                region_name='auto'
+            )
+            
+            # Prepare metadata for R2
+            extra_args = {
+                'ContentType': content_type,
+            }
+            if metadata:
+                # R2 metadata must be strings
+                extra_args['Metadata'] = {str(k): str(v) for k, v in metadata.items()}
+            
+            # Upload to R2
+            s3_client.put_object(
+                Bucket=r2_bucket_name,
+                Key=destination_key,
+                Body=data,
+                **extra_args
+            )
+            
+            logger.info(f"✅ Uploaded to R2: {destination_key} ({len(data)} bytes)")
+            
+            # Return public URL if available
+            if r2_public_url:
+                public_url = f"{r2_public_url.rstrip('/')}/{destination_key}"
+                return public_url
+            
+            # Fallback: return R2 path
+            return destination_key
+            
+        except Exception as e:
+            logger.error(f"❌ R2 upload failed: {e}")
+            import traceback
+            logger.error(f"❌ R2 upload traceback: {traceback.format_exc()}")
+            return None
 
     def create_voice_clone(self, audio_file_path: str, voice_id: str = None, voice_name: str = None, metadata: Dict = None, sample_text: str = None) -> Dict:
         """
@@ -1223,27 +1305,18 @@ class ChatterboxVC:
             
             generation_time = time.time() - start_time
             
-            # Upload files to Firebase
-            logger.info(f"  - Uploading files to Firebase...")
+            # Upload files directly to R2 (skip Firebase Storage)
+            logger.info(f"  - Uploading files directly to R2...")
             
             # Get language and is_kids_voice from metadata or default to 'en' and False
             language = (metadata or {}).get('language', 'en')
             is_kids_voice = (metadata or {}).get('is_kids_voice', False)
             logger.info(f"    - Using language: {language}")
             logger.info(f"    - Is kids voice: {is_kids_voice}")
+            logger.info(f"    - User ID: {user_id_meta}")
             
-            # Determine the base path based on is_kids_voice
-            if is_kids_voice:
-                base_path = f"audio/voices/{language}/kids"
-                logger.info(f"    - Using kids folder: {base_path}")
-            else:
-                base_path = f"audio/voices/{language}"
-                logger.info(f"    - Using regular folder: {base_path}")
-            
-            # Firebase Storage Structure (standardized by voiceId):
-            # /{base_path}/profiles/{voiceId}.npy
-            # /{base_path}/samples/{voiceId}.mp3
-            # recorded path remains client-provided or recording_{safeName}_{userId}.ext
+            # Use new R2 path structure: private/users/{userId}/voices/{language}/{kids/}{type}s/{voiceId}.{ext}
+            kids_prefix = "kids/" if is_kids_voice else ""
             
             # Pre-create Firestore doc to surface entry immediately while uploads run
             try:
@@ -1281,50 +1354,58 @@ class ChatterboxVC:
                 "country_code": (metadata or {}).get("country_code") or (base_meta or {}).get("country_code"),
             }
 
-            # Upload sample audio to exact path with exact metadata
-            sample_storage_path = f"audio/voices/{language}/samples/{sample_filename}"
-            if is_kids_voice:
-                sample_storage_path = f"audio/voices/{language}/kids/samples/{sample_filename}"
+            # Upload sample audio to R2 with new path structure
+            sample_storage_path = f"private/users/{user_id_meta}/voices/{language}/{kids_prefix}samples/{sample_filename}"
+            logger.info(f"    - Sample R2 path: {sample_storage_path}")
             
-            self.upload_to_firebase(
+            # Set R2 bucket in metadata for routing
+            enriched_with_r2 = enriched.copy()
+            enriched_with_r2["bucket_name"] = "daezend-public-content"
+            
+            sample_url = self.upload_to_firebase(
                 sample_local_path,
                 sample_storage_path,
                 content_type="audio/mpeg",
-                metadata=enriched
+                metadata=enriched_with_r2
             )
             
             # Upload recorded audio using exact filename from API
             # Do not upload recorded audio; use pointer if provided
             recorded_path_for_response = recorded_path_pointer
             
-            # Upload voice profile to exact path with exact metadata
-            profile_storage_path = f"audio/voices/{language}/profiles/{profile_filename}"
-            if is_kids_voice:
-                profile_storage_path = f"audio/voices/{language}/kids/profiles/{profile_filename}"
+            # Upload voice profile to R2 with new path structure
+            profile_storage_path = f"private/users/{user_id_meta}/voices/{language}/{kids_prefix}profiles/{profile_filename}"
+            logger.info(f"    - Profile R2 path: {profile_storage_path}")
             
-            self.upload_to_firebase(
+            profile_url = self.upload_to_firebase(
                 profile_local_path,
                 profile_storage_path,
                 content_type="application/octet-stream",
-                metadata=enriched
+                metadata=enriched_with_r2
             )
             
-            # Return JSON-serializable response
+            # Return JSON-serializable response with R2 paths
             result = {
                 "status": "success",
                 "voice_id": voice_id,
-                "profile_path": profile_filename,
+                "profile_path": profile_filename,  # Filename only (for backward compatibility)
+                "profile_storage_path": profile_storage_path,  # Full R2 path
                 "recorded_audio_path": recorded_path_for_response,
-                "sample_audio_path": sample_filename,
+                "sample_audio_path": sample_filename,  # Filename only (for backward compatibility)
+                "sample_storage_path": sample_storage_path,  # Full R2 path
+                "profile_url": profile_url,  # R2 public URL
+                "sample_url": sample_url,  # R2 public URL
                 "generation_time": generation_time,
                 "metadata": metadata or {},
                 "language": language
             }
             
             logger.info(f"✅ Voice clone created successfully!")
-            logger.info(f"  - Profile (storage): {profile_filename}")
+            logger.info(f"  - Profile R2 path: {profile_storage_path}")
+            logger.info(f"  - Profile URL: {profile_url}")
+            logger.info(f"  - Sample R2 path: {sample_storage_path}")
+            logger.info(f"  - Sample URL: {sample_url}")
             logger.info(f"  - Recorded (storage): {recorded_path_for_response}")
-            logger.info(f"  - Sample (storage): {sample_filename}")
             logger.info(f"  - Generation time: {generation_time:.2f}s")
 
             # Also write/update Firestore voice_profiles document so the main app's /voices list updates in realtime
@@ -1341,7 +1422,8 @@ class ChatterboxVC:
                         _resolved_bucket = resolve_bucket_name(_bucket_hint, _country_hint)
                     except Exception:
                         _resolved_bucket = None
-                    _base_public = f"https://storage.googleapis.com/{_resolved_bucket}" if _resolved_bucket else None
+                    
+                    # Use R2 paths and URLs (new structure)
                     doc_ref.set({
                         "userId": (metadata or {}).get("user_id", ""),
                         "voiceId": voice_id,
@@ -1349,14 +1431,15 @@ class ChatterboxVC:
                         "language": language,
                         "isKidsVoice": is_kids_voice,
                         "status": "ready",
-                        "samplePath": f"{base_path}/samples/{sample_filename}",
-                        "profilePath": f"{base_path}/profiles/{profile_filename}",
+                        "samplePath": sample_storage_path,  # New R2 path structure
+                        "profilePath": profile_storage_path,  # New R2 path structure
                         "recordedPath": recorded_path_for_response,
-                        # Optional region/bucket info (helps migrations and read routing)
-                        "bucket": _resolved_bucket,
-                        "region": (_country_hint or "").upper() if _country_hint else None,
-                        "sampleUrl": f"{_base_public}/{base_path}/samples/{sample_filename}" if _base_public else None,
-                        "profileUrl": f"{_base_public}/{base_path}/profiles/{profile_filename}" if _base_public else None,
+                        # R2 URLs
+                        "sampleUrl": sample_url,
+                        "profileUrl": profile_url,
+                        # Store R2 path explicitly for validation
+                        "r2SamplePath": sample_storage_path,
+                        "r2ProfilePath": profile_storage_path,
                         "createdAt": SERVER_TIMESTAMP,
                         "updatedAt": SERVER_TIMESTAMP,
                         "metadata": metadata or {},
