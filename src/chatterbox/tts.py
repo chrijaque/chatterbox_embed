@@ -1456,7 +1456,7 @@ class ChatterboxTTS:
             'tensor_to_mp3_bytes',
             'tensor_to_audiosegment',
             'tensor_to_wav_bytes',
-            'upload_to_firebase'
+            'upload_to_storage'
         ]
         
         available_methods = [m for m in dir(self) if not m.startswith('_')]
@@ -2575,13 +2575,13 @@ class ChatterboxTTS:
         
         return wav_bytes
 
-    def upload_to_firebase(self, data: bytes, destination_blob_name: str, content_type: str = "application/octet-stream", metadata: dict = None) -> Optional[str]:
+    def upload_to_storage(self, data: bytes, destination_blob_name: str, content_type: str = "application/octet-stream", metadata: dict = None) -> Optional[str]:
         """
-        Upload data directly to Firebase Storage or R2 with metadata.
-        Automatically detects R2 bucket and routes accordingly.
+        Upload data directly to R2 storage with metadata.
+        Only R2 storage is supported.
         
         :param data: Binary data to upload
-        :param destination_blob_name: Destination path in Firebase/R2
+        :param destination_blob_name: Destination path in R2 (e.g., "private/users/{user_id}/stories/audio/{lang}/{story_id}/{version_id}.mp3")
         :param content_type: MIME type of the file
         :param metadata: Optional metadata to store with the file
         :return: Public URL
@@ -2598,49 +2598,14 @@ class ChatterboxTTS:
             # Basic destination path sanitization
             dest_name = str(destination_blob_name or "").lstrip("/")
 
-            # Check if this is an R2 bucket
-            if is_r2_bucket(resolved_bucket):
-                logger.info(f"🔍 Using R2 upload for bucket: {resolved_bucket}")
-                return self._upload_to_r2(data, dest_name, content_type, metadata)
+            # Only R2 is supported - verify bucket is R2
+            if not is_r2_bucket(resolved_bucket):
+                error_msg = f"Only R2 storage is supported. Bucket '{resolved_bucket}' is not an R2 bucket. Expected 'daezend-public-content'."
+                logger.error(f"❌ {error_msg}")
+                raise ValueError(error_msg)
             
-            # Otherwise use Firebase/GCS
-            from google.cloud import storage
-            
-            logger.info(f"🔍 Using Firebase/GCS upload for bucket: {resolved_bucket}")
-            
-            # Initialize Firebase storage client and bucket
-            storage_client = storage.Client()
-            bucket = storage_client.bucket(resolved_bucket)
-            
-            logger.info(f"🔍 Starting Firebase upload: {dest_name} ({len(data)} bytes) -> bucket={resolved_bucket}")
-            
-            # Create blob and upload (create-only to avoid requiring delete on overwrite)
-            blob = bucket.blob(dest_name)
-            
-            # Set metadata if provided
-            if metadata:
-                blob.metadata = metadata
-            
-            # Upload the data with precondition: create only if object doesn't exist
-            try:
-                blob.upload_from_string(data, content_type=content_type, if_generation_match=0)
-            except Exception as precond_err:
-                # If the object exists or precondition failed, surface the error to caller
-                logger.error(f"❌ Precondition for create-only upload failed: {precond_err}")
-                return None
-            
-            # Try to make the blob publicly accessible (non-fatal if not permitted)
-            public_url: Optional[str]
-            try:
-                blob.make_public()
-                public_url = blob.public_url
-            except Exception as e:
-                logger.warning(f"⚠️ make_public failed (object may still be uploaded): {e}")
-                # Fallback to GCS URL (may still require auth depending on bucket policy)
-                public_url = f"https://storage.googleapis.com/{bucket.name}/{dest_name}"
-
-            logger.info(f"✅ Uploaded to Firebase: {resolved_bucket}/{dest_name} -> {public_url}")
-            return public_url
+            logger.info(f"✅ Using R2 upload for bucket: {resolved_bucket}")
+            return self._upload_to_r2(data, dest_name, content_type, metadata)
             
         except Exception as e:
             logger.error(f"❌ Failed to upload: {e}")
@@ -2777,7 +2742,7 @@ class ChatterboxTTS:
             metadata: Optional metadata (for API compatibility)
             
         Returns:
-            Dict with status, audio_data, firebase_url, firebase_path, story_type, and generation_time
+            Dict with status, audio_data, storage_url (R2), storage_path (R2), story_type, and generation_time
         """
         import time
         import base64
@@ -2804,7 +2769,7 @@ class ChatterboxTTS:
         logger.info(f"  - metadata: {metadata}")
         
         try:
-            # Step 1: Load voice profile from base64 or storage path (GCS/R2)
+            # Step 1: Load voice profile from base64 or R2 storage path
             if profile_base64:
                 logger.info(f"  - Step 1: Loading voice profile from base64...")
                 profile_bytes = base64.b64decode(profile_base64)
@@ -2819,32 +2784,17 @@ class ChatterboxTTS:
                     country_hint = (metadata or {}).get('country_code') if isinstance(metadata, dict) else None
                     resolved_bucket = resolve_bucket_name(bucket_hint, country_hint)
                     
-                    # Check if this is an R2 bucket
-                    if is_r2_bucket(resolved_bucket):
-                        logger.info(f"    - Using R2 download (bucket={resolved_bucket})")
-                        profile_bytes = self._download_from_r2(profile_path)
-                        if not profile_bytes:
-                            raise ValueError(f"Failed to download profile from R2: {profile_path}")
-                        logger.info(f"    - Voice profile downloaded from R2 (bucket={resolved_bucket})")
-                    else:
-                        # Use GCS download
-                        from google.cloud import storage
-                        storage_client = storage.Client()
-                        # Resolve primary region bucket from hints; fall back to US default if needed
-                        primary_bucket_name = resolved_bucket
-                        us_bucket_name = resolve_bucket_name(None, None)
-
-                        def _download_from(bucket_name: str) -> bytes:
-                            b = storage_client.bucket(bucket_name)
-                            return b.blob(profile_path).download_as_bytes()
-
-                        try:
-                            profile_bytes = _download_from(primary_bucket_name)
-                            logger.info(f"    - Voice profile downloaded from GCS (bucket={primary_bucket_name})")
-                        except Exception as primary_err:
-                            logger.warning(f"    - Primary bucket download failed ({primary_bucket_name}), trying US fallback: {primary_err}")
-                            profile_bytes = _download_from(us_bucket_name)
-                            logger.info(f"    - Voice profile downloaded from GCS (US fallback bucket={us_bucket_name})")
+                    # Only R2 is supported - verify bucket is R2
+                    if not is_r2_bucket(resolved_bucket):
+                        error_msg = f"Only R2 storage is supported. Bucket '{resolved_bucket}' is not an R2 bucket. Expected 'daezend-public-content'."
+                        logger.error(f"❌ {error_msg}")
+                        raise ValueError(error_msg)
+                    
+                    logger.info(f"    - Using R2 download (bucket={resolved_bucket})")
+                    profile_bytes = self._download_from_r2(profile_path)
+                    if not profile_bytes:
+                        raise ValueError(f"Failed to download profile from R2: {profile_path}")
+                    logger.info(f"    - Voice profile downloaded from R2 (bucket={resolved_bucket})")
                 except Exception as storage_e:
                     logger.error(f"❌ Failed to download profile from storage: {storage_e}")
                     raise
@@ -2876,7 +2826,7 @@ class ChatterboxTTS:
             logger.info(f"  - Step 3: Converting to MP3...")
             mp3_bytes = self.tensor_to_mp3_bytes(audio_tensor, sample_rate, "96k")
             
-            # Step 4: Upload directly to R2 (skip Firebase Storage)
+            # Step 4: Upload directly to R2
             logger.info(f"  - Step 4: Uploading directly to R2...")
             
             # Extract story_type from metadata or use direct parameter
@@ -2921,7 +2871,7 @@ class ChatterboxTTS:
             r2_url = None
             try:
                 # Always use R2 bucket for user stories
-                r2_url = self.upload_to_firebase(
+                r2_url = self.upload_to_storage(
                     data=mp3_bytes,
                     destination_blob_name=r2_path,
                     content_type="audio/mpeg",
@@ -2958,15 +2908,18 @@ class ChatterboxTTS:
             
             generation_time = time.time() - start_time
             
-            # Return result with R2 URL and path (no Firebase Storage references)
+            # Return result with R2 URL and path
             result = {
                 "status": "success",
                 "audio_data": audio_base64,
-                "firebase_url": r2_url,  # R2 public URL (for backward compatibility)
-                "firebase_path": r2_path,  # R2 path (for backward compatibility)
+                "storage_url": r2_url,  # R2 public URL (primary)
+                "storage_path": r2_path,  # R2 path (primary)
                 "r2_path": r2_path,  # Explicit R2 path for callback validation
+                "r2_url": r2_url,  # Explicit R2 URL
                 "audio_url": r2_url,  # Alias for compatibility
-                "storage_path": r2_path,  # Alias for compatibility
+                # Backward compatibility keys (deprecated, use storage_url/storage_path)
+                "firebase_url": r2_url,
+                "firebase_path": r2_path,
                 "version_id": version_id,
                 "story_type": final_story_type,
                 "generation_time": generation_time,

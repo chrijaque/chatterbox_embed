@@ -437,7 +437,7 @@ torchaudio.save("converted.wav", converted_audio, vc_model.sr)
 | `metadata.profile_filename` | Required filename for voice profile (.npy) |
 | `metadata.sample_filename` | Required filename for sample audio (.mp3) |
 | `metadata.recorded_filename` | Required filename for recorded audio (.wav) |
-| `metadata.storage_metadata` | Exact metadata for Firebase Storage uploads |
+| `metadata.storage_metadata` | Exact metadata for R2 uploads |
 | `sample_text` | Custom text for voice samples (optional) |
 
 ### Benefits of Voice Cloning
@@ -519,7 +519,7 @@ response = {
 
 - **📝 Long Text Processing**: Automatic chunking and stitching for long stories
 - **🎵 Audio Conversion**: Professional MP3 conversion with configurable bitrates
-- **☁️ Firebase Upload**: Direct upload to Firebase Storage with metadata
+- **☁️ Firebase Upload**: Direct upload to R2 with metadata
 - **📊 Comprehensive Metadata**: Detailed information about generation process
 - **🔄 Error Handling**: Robust error handling with fallback options
 - **🧹 Automatic Cleanup**: Temporary file cleanup and memory management

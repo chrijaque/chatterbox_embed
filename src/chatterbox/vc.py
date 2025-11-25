@@ -42,48 +42,36 @@ REPO_ID = "ResembleAI/chatterbox"
 
 def resolve_bucket_name(bucket_name: Optional[str] = None, country_code: Optional[str] = None) -> str:
     """
-    Normalize and resolve the target bucket name for uploads (GCS or R2).
-    Priority:
-      1) Explicit bucket_name (strip gs:// prefix and Firebase Storage domain suffixes)
-      2) AU if country_code == 'AU' and AU env present
-      3) US default
+    Resolve R2 bucket name. Only R2 storage is supported.
     
-    Normalizes Firebase Storage domain formats to actual GCS bucket names:
-    - godnathistorie-a25fa.firebasestorage.app -> godnathistorie-a25fa
-    - godnathistorie-a25fa.appspot.com -> godnathistorie-a25fa
+    Returns the R2 bucket name (defaults to 'daezend-public-content').
+    The country_code parameter is ignored as we only use a single R2 bucket.
     
-    Recognizes R2 bucket names:
-    - daezend-public-content -> daezend-public-content (R2 bucket)
+    :param bucket_name: Optional explicit bucket name (will be validated as R2)
+    :param country_code: Ignored (kept for API compatibility)
+    :return: R2 bucket name
     """
     import os as _os
+    
+    # Default R2 bucket
+    default_r2_bucket = _os.getenv('R2_BUCKET_NAME', 'daezend-public-content')
+    
     if bucket_name:
-        bn = str(bucket_name).replace('gs://', '').replace('r2://', '')
-    elif (country_code or '').upper() == 'AU':
-        bn = _os.getenv('GCS_BUCKET_AU') or _os.getenv('FIREBASE_STORAGE_BUCKET_AU') or ''
-    else:
-        bn = _os.getenv('GCS_BUCKET_US') or _os.getenv('FIREBASE_STORAGE_BUCKET') or ''
-    bn = (bn or '').strip()
-    # Basic validation: forbid slashes and stray prefixes
-    if bn.startswith('gs://'):
-        bn = bn.replace('gs://', '')
-    if bn.startswith('r2://'):
-        bn = bn.replace('r2://', '')
-    # Strip protocol if present
-    if bn.startswith('https://') or bn.startswith('http://'):
-        bn = bn.split('://', 1)[1]
-    # If URL-like, take host part only
-    if '/' in bn:
-        bn = bn.split('/')[0]
-    # Strip Firebase Storage domain suffixes (GCS client needs actual bucket name)
-    if bn.endswith('.firebasestorage.app'):
-        bn = bn.replace('.firebasestorage.app', '')
-    if bn.endswith('.appspot.com'):
-        bn = bn.replace('.appspot.com', '')
-    if '/' in bn or '\\' in bn:
-        raise ValueError(f"Invalid bucket name (contains slash): {bn}")
-    if not bn:
-        raise ValueError("Bucket name could not be resolved from inputs or environment")
-    return bn
+        # Clean up the bucket name
+        bn = str(bucket_name).replace('r2://', '').replace('gs://', '').strip()
+        # Strip protocol if present
+        if bn.startswith('https://') or bn.startswith('http://'):
+            bn = bn.split('://', 1)[1]
+        # If URL-like, take host part only
+        if '/' in bn:
+            bn = bn.split('/')[0]
+        # Validate it's an R2 bucket
+        if not is_r2_bucket(bn):
+            raise ValueError(f"Only R2 storage is supported. Bucket '{bn}' is not an R2 bucket. Expected 'daezend-public-content'.")
+        return bn
+    
+    # Return default R2 bucket
+    return default_r2_bucket
 
 def is_r2_bucket(bucket_name: str) -> bool:
     """Check if bucket name indicates R2 storage."""
@@ -114,79 +102,27 @@ def build_voice_id_with_user(voice_name: str, user_id: str) -> str:
 def generate_unique_voice_id(voice_name: str, length: int = 8, max_attempts: int = 10) -> str:
     """
     Generate a unique voice ID with random alphanumeric characters to prevent naming collisions.
-    Checks Firebase to ensure uniqueness.
+    Uses timestamp-based suffix to ensure uniqueness (R2 storage doesn't require pre-check).
     
     Args:
         voice_name: The base voice name
         length: Length of the random alphanumeric suffix (default: 8)
-        max_attempts: Maximum attempts to generate unique ID (default: 10)
+        max_attempts: Maximum attempts to generate unique ID (default: 10, not used but kept for compatibility)
         
     Returns:
-        Unique voice ID in format: voice_{voice_name}_{random_alphanumeric}
+        Unique voice ID in format: voice_{voice_name}_{random_alphanumeric}_{timestamp}
         
     Example:
-        generate_unique_voice_id("christestclone") -> "voice_christestclone_A7b2K9x1"
+        generate_unique_voice_id("christestclone") -> "voice_christestclone_A7b2K9x1_123456"
     """
-    from google.cloud import storage
-    # Resolve default bucket (US/AU) from env; uniqueness check is not region-specific to AU here
-    try:
-        storage_client = storage.Client()
-        resolved_bucket = resolve_bucket_name()
-        bucket = storage_client.bucket(resolved_bucket)
-        logger.info(f"✅ Firebase client initialized for uniqueness check (bucket={resolved_bucket})")
-    except Exception as e:
-        logger.warning(f"⚠️ Could not initialize Firebase client: {e}")
-        logger.warning("⚠️ Proceeding without uniqueness check")
-        bucket = None
+    # Generate random alphanumeric suffix (letters + numbers)
+    random_suffix = ''.join(random.choices(string.ascii_letters + string.digits, k=length))
     
-    for attempt in range(max_attempts):
-        # Generate random alphanumeric suffix (letters + numbers)
-        random_suffix = ''.join(random.choices(string.ascii_letters + string.digits, k=length))
-        
-        # Create voice ID
-        voice_id = f"voice_{voice_name}_{random_suffix}"
-        
-        # Check if this voice_id already exists in Firebase
-        if bucket is not None:
-            try:
-                # Check in all language folders for existing profiles
-                languages = ['en', 'es', 'fr', 'de', 'it', 'pt', 'ru', 'ja', 'ko', 'zh']  # Add more as needed
-                exists = False
-                
-                for lang in languages:
-                    # Check regular profiles
-                    profile_path = f"audio/voices/{lang}/profiles/{voice_id}.npy"
-                    blob = bucket.blob(profile_path)
-                    if blob.exists():
-                        logger.info(f"🔄 Voice ID {voice_id} already exists in {lang}/profiles, retrying...")
-                        exists = True
-                        break
-                    
-                    # Check kids profiles
-                    kids_profile_path = f"audio/voices/{lang}/kids/profiles/{voice_id}.npy"
-                    kids_blob = bucket.blob(kids_profile_path)
-                    if kids_blob.exists():
-                        logger.info(f"🔄 Voice ID {voice_id} already exists in {lang}/kids/profiles, retrying...")
-                        exists = True
-                        break
-                
-                if not exists:
-                    logger.info(f"✅ Generated unique voice ID: {voice_id}")
-                    return voice_id
-                    
-            except Exception as e:
-                logger.warning(f"⚠️ Error checking Firebase uniqueness: {e}")
-                logger.info(f"✅ Generated voice ID (no uniqueness check): {voice_id}")
-                return voice_id
-        else:
-            # No Firebase check available, return the generated ID
-            logger.info(f"✅ Generated voice ID (no uniqueness check): {voice_id}")
-            return voice_id
-    
-    # If we've exhausted all attempts, add timestamp to ensure uniqueness
+    # Add timestamp to ensure uniqueness
     timestamp = str(int(time.time()))[-6:]  # Last 6 digits of timestamp
     voice_id = f"voice_{voice_name}_{random_suffix}_{timestamp}"
-    logger.warning(f"⚠️ Exhausted uniqueness attempts, using timestamp: {voice_id}")
+    
+    logger.info(f"✅ Generated unique voice ID: {voice_id}")
     return voice_id
 
 
@@ -1016,13 +952,13 @@ class ChatterboxVC:
     # ------------------------------------------------------------------
     # Voice Cloning Pipeline
     # ------------------------------------------------------------------
-    def upload_to_firebase(self, file_path: str, destination_blob_name: str, content_type: str = "application/octet-stream", metadata: dict = None) -> str:
+    def upload_to_storage(self, file_path: str, destination_blob_name: str, content_type: str = "application/octet-stream", metadata: dict = None) -> str:
         """
-        Upload a file to Firebase Storage or R2 with metadata.
-        Automatically detects R2 bucket and routes accordingly.
+        Upload a file to R2 storage with metadata.
+        Only R2 storage is supported.
         
         :param file_path: Path to the file to upload
-        :param destination_blob_name: Destination path in Firebase/R2
+        :param destination_blob_name: Destination path in R2 (e.g., "private/users/{user_id}/voices/{lang}/profiles/{voice_id}.npy")
         :param content_type: MIME type of the file
         :param metadata: Optional metadata to store with the file
         :return: Public URL
@@ -1035,83 +971,46 @@ class ChatterboxVC:
                 if metadata:
                     bucket_hint = metadata.get("bucket_name") or metadata.get("bucket") or None
                     country_hint = metadata.get("country_code") or metadata.get("region") or None
-            except Exception:
+                    logger.info(f"🔍 DEBUG: metadata keys={list(metadata.keys()) if metadata else 'None'}")
+                    logger.info(f"🔍 DEBUG: bucket_hint={bucket_hint}, country_hint={country_hint}")
+                    logger.info(f"🔍 DEBUG: metadata.get('bucket_name')={metadata.get('bucket_name')}")
+            except Exception as e:
+                logger.warning(f"⚠️ Error extracting bucket hints: {e}")
                 bucket_hint = None
                 country_hint = None
 
-            resolved_bucket = resolve_bucket_name(bucket_hint, country_hint)
+            # Use R2 bucket (only storage supported)
+            if bucket_hint and is_r2_bucket(bucket_hint):
+                logger.info(f"✅ Explicit R2 bucket detected: {bucket_hint}, routing directly to R2")
+                resolved_bucket = bucket_hint
+            else:
+                # Resolve to default R2 bucket
+                resolved_bucket = resolve_bucket_name(bucket_hint, country_hint)
+                logger.info(f"🔍 Using R2 bucket: {resolved_bucket}")
 
             # Basic destination path sanitization
             dest_name = str(destination_blob_name or "").lstrip("/")
             if ".." in dest_name or dest_name.startswith("/"):
                 raise ValueError(f"Invalid destination path: {destination_blob_name}")
 
-            # Check if this is an R2 bucket
-            if is_r2_bucket(resolved_bucket):
-                logger.info(f"🔍 Using R2 upload for bucket: {resolved_bucket}")
-                # Read file and upload to R2
-                with open(file_path, 'rb') as f:
-                    file_data = f.read()
-                return self._upload_to_r2(file_data, dest_name, content_type, metadata)
+            # Only R2 is supported - verify bucket is R2
+            if not is_r2_bucket(resolved_bucket):
+                error_msg = f"Only R2 storage is supported. Bucket '{resolved_bucket}' is not an R2 bucket. Expected 'daezend-public-content'."
+                logger.error(f"❌ {error_msg}")
+                raise ValueError(error_msg)
             
-            # Otherwise use Firebase/GCS
-            from google.cloud import storage
-            
-            logger.info(f"🔍 Using Firebase/GCS upload for bucket: {resolved_bucket}")
-            
-            # Initialize Firebase storage client
-            storage_client = storage.Client()
-            bucket = storage_client.bucket(resolved_bucket)
-            
-            # Get file size for logging
-            file_size = os.path.getsize(file_path)
-            logger.info(f"🔍 Starting Firebase upload: {dest_name} ({file_size:,} bytes) -> bucket={resolved_bucket}")
-            
-            # Create blob and upload directly from file (more efficient for large files)
-            blob = bucket.blob(dest_name)
-            
-            # Set metadata if provided
-            if metadata:
-                blob.metadata = metadata
-                logger.info(f"📋 Setting metadata on blob: {metadata}")
-            
-            # Upload directly from file path (more memory efficient)
-            blob.upload_from_filename(file_path, content_type=content_type)
-
-            # Persist metadata explicitly to ensure it sticks
-            if metadata:
-                try:
-                    blob.patch()
-                    logger.info(f"✅ Patched metadata for: {destination_blob_name}")
-                    # Verify and retry once if needed
-                    blob.reload()
-                    if not blob.metadata or any(k not in (blob.metadata or {}) for k in metadata.keys()):
-                        logger.warning(f"⚠️ Metadata not present after patch; retrying set+patch for {destination_blob_name}")
-                        blob.metadata = metadata
-                        blob.patch()
-                        blob.reload()
-                except Exception as _patch_e:
-                    logger.warning(f"⚠️ Could not patch metadata for {destination_blob_name}: {_patch_e}")
-            
-            # Make the blob publicly accessible
-            blob.make_public()
-            
-            public_url = blob.public_url
-            logger.info(f"✅ Uploaded to Firebase: {resolved_bucket}/{dest_name} -> {public_url}")
-            
-            return public_url
+            logger.info(f"✅ ROUTING TO R2: bucket={resolved_bucket}, path={dest_name}")
+            # Read file and upload to R2
+            with open(file_path, 'rb') as f:
+                file_data = f.read()
+            return self._upload_to_r2(file_data, dest_name, content_type, metadata)
             
         except Exception as e:
             logger.error(f"❌ Failed to upload: {e}")
             import traceback
             logger.error(f"❌ Upload traceback: {traceback.format_exc()}")
-            # Return a bucket-qualified HTTPS URL as fallback
-            try:
-                fallback_bucket = resolved_bucket if 'resolved_bucket' in locals() else resolve_bucket_name(bucket_hint, country_hint)
-            except Exception:
-                fallback_bucket = "unknown-bucket"
-            safe_dest = str(destination_blob_name or "").lstrip("/")
-            return f"https://storage.googleapis.com/{fallback_bucket}/{safe_dest}"
+            # Re-raise the exception - no fallback URLs
+            raise
     
     def _upload_to_r2(self, data: bytes, destination_key: str, content_type: str = "application/octet-stream", metadata: dict = None) -> Optional[str]:
         """
@@ -1305,7 +1204,7 @@ class ChatterboxVC:
             
             generation_time = time.time() - start_time
             
-            # Upload files directly to R2 (skip Firebase Storage)
+            # Upload files directly to R2
             logger.info(f"  - Uploading files directly to R2...")
             
             # Get language and is_kids_voice from metadata or default to 'en' and False
@@ -1358,11 +1257,13 @@ class ChatterboxVC:
             sample_storage_path = f"private/users/{user_id_meta}/voices/{language}/{kids_prefix}samples/{sample_filename}"
             logger.info(f"    - Sample R2 path: {sample_storage_path}")
             
-            # Set R2 bucket in metadata for routing
+            # Set R2 bucket in metadata for routing - remove country_code to prevent Firebase fallback
             enriched_with_r2 = enriched.copy()
             enriched_with_r2["bucket_name"] = "daezend-public-content"
+            enriched_with_r2.pop("country_code", None)  # Remove country_code to force R2 routing
+            logger.info(f"🔍 DEBUG: enriched_with_r2 before upload: bucket_name={enriched_with_r2.get('bucket_name')}, keys={list(enriched_with_r2.keys())}")
             
-            sample_url = self.upload_to_firebase(
+            sample_url = self.upload_to_storage(
                 sample_local_path,
                 sample_storage_path,
                 content_type="audio/mpeg",
@@ -1377,7 +1278,9 @@ class ChatterboxVC:
             profile_storage_path = f"private/users/{user_id_meta}/voices/{language}/{kids_prefix}profiles/{profile_filename}"
             logger.info(f"    - Profile R2 path: {profile_storage_path}")
             
-            profile_url = self.upload_to_firebase(
+            # Use same R2 metadata (country_code already removed above)
+            logger.info(f"🔍 DEBUG: enriched_with_r2 before profile upload: bucket_name={enriched_with_r2.get('bucket_name')}, keys={list(enriched_with_r2.keys())}")
+            profile_url = self.upload_to_storage(
                 profile_local_path,
                 profile_storage_path,
                 content_type="application/octet-stream",
@@ -1416,12 +1319,8 @@ class ChatterboxVC:
                     doc_id = voice_id
                     doc_ref = client.collection("voice_profiles").document(doc_id)
                     # Region/bucket hints for downstream reads (optional)
-                    _bucket_hint = (metadata or {}).get("bucket_name") or (metadata or {}).get("bucket")
-                    _country_hint = (metadata or {}).get("country_code") or (metadata or {}).get("region")
-                    try:
-                        _resolved_bucket = resolve_bucket_name(_bucket_hint, _country_hint)
-                    except Exception:
-                        _resolved_bucket = None
+                    # Bucket resolution no longer needed (R2 only)
+                    _resolved_bucket = None
                     
                     # Use R2 paths and URLs (new structure)
                     doc_ref.set({
@@ -1451,7 +1350,7 @@ class ChatterboxVC:
             except Exception as e:
                 logger.warning(f"⚠️ Failed to write Firestore voice_profiles doc: {e}")
             
-            # Clean up local files after Firebase upload (keep serverless environment clean)
+            # Clean up local files after storage upload (keep serverless environment clean)
             try:
                 local_cleanup = [profile_local_path, sample_local_path]
                 if recorded_audio_path_local:
