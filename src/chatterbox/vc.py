@@ -23,113 +23,18 @@ from .models.voice_encoder import VoiceEncoder
 from .models.t3 import T3
 from .models.tokenizers.tokenizer import EnTokenizer
 from .models.t3.modules.cond_enc import T3Cond
-# Note: punc_norm and ChatterboxTTS are imported lazily inside methods to avoid circular import
+
+# Import from new modules
+from .utils import PYDUB_AVAILABLE, REPO_ID
+from .text.normalization import punc_norm
+from .storage.bucket_resolver import resolve_bucket_name, is_r2_bucket
+from .storage.r2_storage import upload_to_r2, init_firestore_client
+from .audio.conversion import tensor_to_mp3_bytes, tensor_to_audiosegment, tensor_to_wav_bytes, convert_audio_file_to_mp3
 
 # Configure logging
 logger = logging.getLogger(__name__)
 
-# Try to import optional dependencies
-try:
-    from pydub import AudioSegment
-    PYDUB_AVAILABLE = True
-    logger.info("✅ pydub available for audio processing")
-except ImportError:
-    PYDUB_AVAILABLE = False
-    logger.warning("⚠️ pydub not available - will use torchaudio for audio processing")
-
-REPO_ID = "ResembleAI/chatterbox"
-
-
-def resolve_bucket_name(bucket_name: Optional[str] = None, country_code: Optional[str] = None) -> str:
-    """
-    Resolve R2 bucket name. Only R2 storage is supported.
-    
-    Returns the R2 bucket name (defaults to 'daezend-public-content').
-    The country_code parameter is ignored as we only use a single R2 bucket.
-    Non-R2 bucket names are ignored and the default R2 bucket is returned.
-    
-    :param bucket_name: Optional explicit bucket name (will be validated as R2, ignored if not R2)
-    :param country_code: Ignored (kept for API compatibility)
-    :return: R2 bucket name
-    """
-    import os as _os
-    import logging
-    
-    logger = logging.getLogger(__name__)
-    
-    # Default R2 bucket
-    default_r2_bucket = _os.getenv('R2_BUCKET_NAME', 'daezend-public-content')
-    
-    if bucket_name:
-        # Clean up the bucket name
-        bn = str(bucket_name).replace('r2://', '').replace('gs://', '').strip()
-        # Strip protocol if present
-        if bn.startswith('https://') or bn.startswith('http://'):
-            bn = bn.split('://', 1)[1]
-        # If URL-like, take host part only
-        if '/' in bn:
-            bn = bn.split('/')[0]
-        # Validate it's an R2 bucket
-        if is_r2_bucket(bn):
-            return bn
-        else:
-            # Non-R2 bucket name provided (likely old Firebase bucket) - ignore and use default R2 bucket
-            logger.warning(f"⚠️ Non-R2 bucket name '{bn}' provided (likely legacy Firebase bucket). Ignoring and using default R2 bucket '{default_r2_bucket}'.")
-    
-    # Return default R2 bucket
-    return default_r2_bucket
-
-def is_r2_bucket(bucket_name: str) -> bool:
-    """Check if bucket name indicates R2 storage."""
-    return bucket_name == 'daezend-public-content' or bucket_name.startswith('r2://')
-
-
-def make_safe_slug(value: str) -> str:
-    """Create a filesystem and URL-safe slug from a string."""
-    if value is None:
-        return ""
-    import re as _re
-    slug = value.strip().lower()
-    slug = _re.sub(r"\s+", "_", slug)
-    slug = _re.sub(r"[^a-z0-9_-]", "", slug)
-    slug = slug.strip("_-")
-    return slug or "voice"
-
-
-def build_voice_id_with_user(voice_name: str, user_id: str) -> str:
-    """Build voice id in the format voice_{name}_{userID} using sanitized parts."""
-    name_part = make_safe_slug(voice_name or "voice")
-    user_part = make_safe_slug(user_id or "")
-    if user_part:
-        return f"voice_{name_part}_{user_part}"
-    return f"voice_{name_part}"
-
-
-def generate_unique_voice_id(voice_name: str, length: int = 8, max_attempts: int = 10) -> str:
-    """
-    Generate a unique voice ID with random alphanumeric characters to prevent naming collisions.
-    Uses timestamp-based suffix to ensure uniqueness (R2 storage doesn't require pre-check).
-    
-    Args:
-        voice_name: The base voice name
-        length: Length of the random alphanumeric suffix (default: 8)
-        max_attempts: Maximum attempts to generate unique ID (default: 10, not used but kept for compatibility)
-        
-    Returns:
-        Unique voice ID in format: voice_{voice_name}_{random_alphanumeric}_{timestamp}
-        
-    Example:
-        generate_unique_voice_id("christestclone") -> "voice_christestclone_A7b2K9x1_123456"
-    """
-    # Generate random alphanumeric suffix (letters + numbers)
-    random_suffix = ''.join(random.choices(string.ascii_letters + string.digits, k=length))
-    
-    # Add timestamp to ensure uniqueness
-    timestamp = str(int(time.time()))[-6:]  # Last 6 digits of timestamp
-    voice_id = f"voice_{voice_name}_{random_suffix}_{timestamp}"
-    
-    logger.info(f"✅ Generated unique voice ID: {voice_id}")
-    return voice_id
+# Note: ChatterboxTTS is imported lazily inside methods to avoid circular import
 
 
 class ChatterboxVC:
@@ -526,8 +431,6 @@ class ChatterboxVC:
             
             # Step 2: Process text and tokenize
             logger.info(f"  - Processing and tokenizing text...")
-            # Lazy import to avoid circular dependency
-            from .tts import punc_norm
             text = punc_norm(text)
             text_tokens = self.tokenizer.text_to_tokens(text).to(self.device)
 
@@ -850,112 +753,6 @@ class ChatterboxVC:
             raise
 
     # ------------------------------------------------------------------
-    # Audio Processing Utilities
-    # ------------------------------------------------------------------
-    def tensor_to_mp3_bytes(self, audio_tensor: torch.Tensor, sample_rate: int, bitrate: str = "96k") -> bytes:
-        """
-        Convert audio tensor directly to MP3 bytes.
-        
-        :param audio_tensor: PyTorch audio tensor
-        :param sample_rate: Audio sample rate
-        :param bitrate: MP3 bitrate (e.g., "96k", "128k", "160k")
-        :return: MP3 bytes
-        """
-        if PYDUB_AVAILABLE:
-            try:
-                # Convert tensor to AudioSegment
-                audio_segment = self.tensor_to_audiosegment(audio_tensor, sample_rate)
-                try:
-                    logger.info(f"🔊 mp3 pre-export: peak={audio_segment.max_dBFS:.2f} dBFS, avg={audio_segment.dBFS:.2f} dBFS")
-                except Exception:
-                    pass
-                # Export to MP3 bytes
-                mp3_file = audio_segment.export(format="mp3", bitrate=bitrate)
-                # Read the bytes from the file object
-                mp3_bytes = mp3_file.read()
-                return mp3_bytes
-            except Exception as e:
-                logger.warning(f"Direct MP3 conversion failed: {e}, falling back to WAV")
-                return self.tensor_to_wav_bytes(audio_tensor, sample_rate)
-        else:
-            logger.warning("pydub not available, falling back to WAV")
-            return self.tensor_to_wav_bytes(audio_tensor, sample_rate)
-
-    def tensor_to_audiosegment(self, audio_tensor: torch.Tensor, sample_rate: int):
-        """
-        Convert PyTorch audio tensor to pydub AudioSegment.
-        
-        :param audio_tensor: PyTorch audio tensor
-        :param sample_rate: Audio sample rate
-        :return: pydub AudioSegment
-        """
-        if not PYDUB_AVAILABLE:
-            raise ImportError("pydub is required for audio conversion")
-        
-        # Convert tensor to numpy array
-        if audio_tensor.dim() == 2:
-            # Stereo: (channels, samples)
-            audio_np = audio_tensor.numpy()
-        else:
-            # Mono: (samples,) -> (1, samples)
-            audio_np = audio_tensor.unsqueeze(0).numpy()
-        
-        # Convert to int16 for pydub
-        audio_np = (audio_np * 32767).astype(np.int16)
-        
-        # Create AudioSegment
-        audio_segment = AudioSegment(
-            audio_np.tobytes(),
-            frame_rate=sample_rate,
-            sample_width=2,  # 16-bit
-            channels=audio_np.shape[0]
-        )
-        
-        return audio_segment
-
-    def tensor_to_wav_bytes(self, audio_tensor: torch.Tensor, sample_rate: int) -> bytes:
-        """
-        Convert audio tensor to WAV bytes (fallback).
-        
-        :param audio_tensor: PyTorch audio tensor
-        :param sample_rate: Audio sample rate
-        :return: WAV bytes
-        """
-        # Save to temporary WAV file
-        temp_wav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-        torchaudio.save(temp_wav.name, audio_tensor, sample_rate)
-        
-        # Read WAV bytes
-        with open(temp_wav.name, 'rb') as f:
-            wav_bytes = f.read()
-        
-        # Clean up temp file
-        os.unlink(temp_wav.name)
-        
-        return wav_bytes
-
-    def convert_audio_file_to_mp3(self, input_path: str, output_path: str, bitrate: str = "160k"):
-        """
-        Convert audio file to MP3 with specified bitrate.
-        
-        :param input_path: Path to input audio file
-        :param output_path: Path to output MP3 file
-        :param bitrate: MP3 bitrate
-        """
-        if not PYDUB_AVAILABLE:
-            raise ImportError("pydub is required for audio conversion")
-        
-        try:
-            # Load audio file
-            audio = AudioSegment.from_file(input_path)
-            # Export as MP3
-            audio.export(output_path, format="mp3", bitrate=bitrate)
-            logger.info(f"✅ Converted {input_path} to MP3: {output_path}")
-        except Exception as e:
-            logger.error(f"❌ Failed to convert {input_path} to MP3: {e}")
-            raise
-
-    # ------------------------------------------------------------------
     # Voice Cloning Pipeline
     # ------------------------------------------------------------------
     def upload_to_storage(self, file_path: str, destination_blob_name: str, content_type: str = "application/octet-stream", metadata: dict = None) -> str:
@@ -1009,7 +806,7 @@ class ChatterboxVC:
             # Read file and upload to R2
             with open(file_path, 'rb') as f:
                 file_data = f.read()
-            return self._upload_to_r2(file_data, dest_name, content_type, metadata)
+            return upload_to_r2(file_data, dest_name, content_type, metadata)
             
         except Exception as e:
             logger.error(f"❌ Failed to upload: {e}")
@@ -1017,73 +814,6 @@ class ChatterboxVC:
             logger.error(f"❌ Upload traceback: {traceback.format_exc()}")
             # Re-raise the exception - no fallback URLs
             raise
-    
-    def _upload_to_r2(self, data: bytes, destination_key: str, content_type: str = "application/octet-stream", metadata: dict = None) -> Optional[str]:
-        """
-        Upload data to Cloudflare R2 using boto3 S3 client.
-        
-        :param data: Binary data to upload
-        :param destination_key: Destination key/path in R2
-        :param content_type: MIME type of the file
-        :param metadata: Optional metadata dict (will be stored as R2 metadata)
-        :return: Public URL or None if failed
-        """
-        try:
-            import boto3
-            import os
-            
-            # Get R2 credentials from environment
-            r2_account_id = os.getenv('R2_ACCOUNT_ID')
-            r2_access_key_id = os.getenv('R2_ACCESS_KEY_ID')
-            r2_secret_access_key = os.getenv('R2_SECRET_ACCESS_KEY')
-            r2_endpoint = os.getenv('R2_ENDPOINT')
-            r2_bucket_name = os.getenv('R2_BUCKET_NAME', 'daezend-public-content')
-            r2_public_url = os.getenv('NEXT_PUBLIC_R2_PUBLIC_URL') or os.getenv('R2_PUBLIC_URL')
-            
-            if not all([r2_account_id, r2_access_key_id, r2_secret_access_key, r2_endpoint]):
-                logger.error("❌ R2 credentials not configured")
-                return None
-            
-            # Create S3 client for R2
-            s3_client = boto3.client(
-                's3',
-                endpoint_url=r2_endpoint,
-                aws_access_key_id=r2_access_key_id,
-                aws_secret_access_key=r2_secret_access_key,
-                region_name='auto'
-            )
-            
-            # Prepare metadata for R2
-            extra_args = {
-                'ContentType': content_type,
-            }
-            if metadata:
-                # R2 metadata must be strings
-                extra_args['Metadata'] = {str(k): str(v) for k, v in metadata.items()}
-            
-            # Upload to R2
-            s3_client.put_object(
-                Bucket=r2_bucket_name,
-                Key=destination_key,
-                Body=data,
-                **extra_args
-            )
-            
-            logger.info(f"✅ Uploaded to R2: {destination_key} ({len(data)} bytes)")
-            
-            # Return public URL if available
-            if r2_public_url:
-                public_url = f"{r2_public_url.rstrip('/')}/{destination_key}"
-                return public_url
-            
-            # Fallback: return R2 path
-            return destination_key
-            
-        except Exception as e:
-            logger.error(f"❌ R2 upload failed: {e}")
-            import traceback
-            logger.error(f"❌ R2 upload traceback: {traceback.format_exc()}")
-            return None
 
     def create_voice_clone(self, audio_file_path: str, voice_id: str = None, voice_name: str = None, metadata: Dict = None, sample_text: str = None) -> Dict:
         """
@@ -1191,7 +921,7 @@ class ChatterboxVC:
             
             # Step 4: Convert sample to MP3 and save (local temp)
             logger.info(f"  - Step 4: Converting sample to MP3...")
-            sample_mp3_bytes = self.tensor_to_mp3_bytes(sample_audio, self.sr, "96k")
+            sample_mp3_bytes = tensor_to_mp3_bytes(sample_audio, self.sr, "96k")
             sample_local_path = sample_filename
             
             # Save sample to file
@@ -1225,7 +955,7 @@ class ChatterboxVC:
             
             # Pre-create Firestore doc to surface entry immediately while uploads run
             try:
-                client_pre = _init_firestore_client()
+                client_pre = init_firestore_client()
                 if client_pre:
                     from google.cloud.firestore import SERVER_TIMESTAMP  # type: ignore
                     doc_ref_pre = client_pre.collection("voice_profiles").document(voice_id)
@@ -1319,7 +1049,7 @@ class ChatterboxVC:
 
             # Also write/update Firestore voice_profiles document so the main app's /voices list updates in realtime
             try:
-                client = _init_firestore_client()
+                client = init_firestore_client()
                 if client:
                     from google.cloud.firestore import SERVER_TIMESTAMP  # type: ignore
                     doc_id = voice_id
@@ -1522,7 +1252,7 @@ class ChatterboxVC:
                 logger.warning(f"    - Loudness normalization skipped: {_e_ln}")
             
             # Convert to MP3 bytes
-            mp3_bytes = self.tensor_to_mp3_bytes(audio_tensor, self.sr, "96k")
+            mp3_bytes = tensor_to_mp3_bytes(audio_tensor, self.sr, "96k")
             
             logger.info(f"✅ Voice sample generated successfully")
             return audio_tensor, mp3_bytes
@@ -1530,36 +1260,6 @@ class ChatterboxVC:
         except Exception as e:
             logger.error(f"❌ Failed to generate voice sample: {e}")
             raise
-
-
-def _init_firestore_client():
-    """Initialize Firestore using explicit service account if provided.
-
-    Prefers RUNPOD_SECRET_Firebase (JSON) to build credentials explicitly so we
-    don't rely on ambient ADC in the RunPod runtime. Falls back to default client.
-    """
-    try:
-        import os
-        import json
-        from google.cloud import firestore
-        from google.oauth2 import service_account  # type: ignore
-
-        sa_json_str = os.environ.get("RUNPOD_SECRET_Firebase")
-        if sa_json_str:
-            try:
-                sa_info = json.loads(sa_json_str)
-                credentials = service_account.Credentials.from_service_account_info(sa_info)
-                project_id = sa_info.get("project_id")
-                client = firestore.Client(project=project_id, credentials=credentials)
-                return client
-            except Exception as inner_e:
-                logger.warning(f"⚠️ Failed to init Firestore from RUNPOD_SECRET_Firebase; falling back to default ADC: {inner_e}")
-
-        # Fallback to default ADC
-        return firestore.Client()
-    except Exception as e:
-        logger.error(f"❌ Failed to initialize Firestore client: {e}")
-        return None
 
 
 def clone_voice(
@@ -1619,7 +1319,7 @@ def clone_voice(
             pass
 
         # Write Firestore voice_profiles/{docId}
-        client = _init_firestore_client()
+        client = init_firestore_client()
         if client and result.get("status") == "success":
             doc_id = voice_id
             doc_ref = client.collection("voice_profiles").document(doc_id)
