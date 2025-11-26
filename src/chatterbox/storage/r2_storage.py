@@ -2,11 +2,34 @@
 import os
 import logging
 import traceback
+import base64
 from typing import Optional
 
 from .bucket_resolver import resolve_bucket_name, is_r2_bucket
 
 logger = logging.getLogger(__name__)
+
+
+def _encode_metadata_value(value: str) -> str:
+    """
+    Encode a metadata value to ensure it's ASCII-compatible for S3/R2 metadata.
+    
+    S3/R2 metadata can only contain ASCII characters. If the value contains
+    non-ASCII characters, it will be base64 encoded with a prefix indicator.
+    
+    :param value: The metadata value to encode
+    :return: ASCII-compatible string (either original or base64 encoded with prefix)
+    """
+    try:
+        # Try to encode as ASCII - if it fails, the string contains non-ASCII
+        value.encode('ascii')
+        # String is already ASCII, return as-is
+        return value
+    except UnicodeEncodeError:
+        # String contains non-ASCII characters, encode with base64
+        encoded = base64.b64encode(value.encode('utf-8')).decode('ascii')
+        # Prefix with special marker to indicate it's base64 encoded
+        return f"base64:{encoded}"
 
 
 def upload_to_r2(data: bytes, destination_key: str, content_type: str = "application/octet-stream", metadata: dict = None, bucket_name: Optional[str] = None) -> Optional[str]:
@@ -50,8 +73,15 @@ def upload_to_r2(data: bytes, destination_key: str, content_type: str = "applica
             'ContentType': content_type,
         }
         if metadata:
-            # R2 metadata must be strings
-            extra_args['Metadata'] = {str(k): str(v) for k, v in metadata.items()}
+            # R2 metadata must be strings and ASCII-compatible
+            # Encode non-ASCII values using base64 to ensure compatibility
+            encoded_metadata = {}
+            for k, v in metadata.items():
+                key_str = str(k)
+                value_str = str(v)
+                # Encode the value if it contains non-ASCII characters
+                encoded_metadata[key_str] = _encode_metadata_value(value_str)
+            extra_args['Metadata'] = encoded_metadata
         
         # Upload to R2
         s3_client.put_object(

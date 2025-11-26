@@ -10,6 +10,7 @@ from .r2_storage import (
     upload_to_r2,
     download_from_r2,
     init_firestore_client,
+    _encode_metadata_value,
 )
 
 __all__ = [
@@ -21,5 +22,6 @@ __all__ = [
     'upload_to_r2',
     'download_from_r2',
     'init_firestore_client',
+    '_encode_metadata_value',
 ]
 

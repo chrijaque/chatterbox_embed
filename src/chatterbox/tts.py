@@ -960,22 +960,32 @@ class ChatterboxTTS:
             logger.exception("❌ Failed to prepare conditionals")
             raise
 
-        logger.info(f"🔄 Using sequential processing with cached conditionals for {len(chunk_infos)} chunks")
+        logger.info(f"🔄 Using sequential processing with adaptive parameters for {len(chunk_infos)} chunks")
         wav_paths = []
 
         for i, chunk_info in enumerate(chunk_infos):
             logger.info(f"🎵 Generating chunk {i+1}/{len(chunk_infos)}: {chunk_info.text[:50]}...")
 
-            # Use fixed parameters for speed (original working approach)
+            # Get adaptive parameters based on chunk content, position, and complexity
+            adaptive_params = self.param_manager.get_adaptive_parameters(chunk_info)
+            
+            # Log intro boost for first chunk
+            if chunk_info.is_first_chunk:
+                logger.info(f"🎬 First chunk detected - applying intro boost: "
+                          f"temp={adaptive_params['temperature']:.2f}, "
+                          f"exag={adaptive_params['exaggeration']:.2f}, "
+                          f"cfg={adaptive_params['cfg_weight']:.2f}")
+
+            # Use adaptive parameters for varied narration
             audio_tensor = self._generate_with_prepared_conditionals(
                 text=chunk_info.text,
                 conditionals=self.conds,
-                exaggeration=base_exaggeration,
-                temperature=base_temperature,
-                cfg_weight=base_cfg_weight,
-                repetition_penalty=1.2,
-                min_p=0.05,
-                top_p=1.0,
+                exaggeration=adaptive_params.get("exaggeration", base_exaggeration),
+                temperature=adaptive_params.get("temperature", base_temperature),
+                cfg_weight=adaptive_params.get("cfg_weight", base_cfg_weight),
+                repetition_penalty=adaptive_params.get("repetition_penalty", 1.2),
+                min_p=adaptive_params.get("min_p", 0.05),
+                top_p=adaptive_params.get("top_p", 1.0),
             )
 
             # Save chunk to temporary file
@@ -1328,6 +1338,7 @@ class ChatterboxTTS:
                         "generation_time": time.time() - start_time,
                         "audio_size": len(mp3_bytes),
                         "duration": generation_metadata.get("duration_sec", 0),
+                        "version_id": version_id,  # Add version ID to metadata for easier discovery
                     }
                 )
                 if r2_url:
