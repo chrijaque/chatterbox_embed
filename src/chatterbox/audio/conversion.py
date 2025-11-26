@@ -2,6 +2,7 @@
 import os
 import tempfile
 import logging
+from typing import Optional
 
 import torch
 import numpy as np
@@ -96,4 +97,28 @@ def tensor_to_wav_bytes(audio_tensor: torch.Tensor, sample_rate: int) -> bytes:
     os.unlink(temp_wav.name)
     
     return wav_bytes
+
+
+def convert_audio_file_to_mp3(input_path: str, output_path: Optional[str] = None, bitrate: str = "96k") -> str:
+    """
+    Convert an audio file on disk to MP3 format.
+
+    :param input_path: Path to an existing audio file readable by pydub/ffmpeg.
+    :param output_path: Optional destination path. Defaults to <stem>.mp3 in same dir.
+    :param bitrate: Target MP3 bitrate string (e.g. "96k").
+    :return: Path to the written MP3 file.
+    """
+    if not PYDUB_AVAILABLE:
+        raise ImportError("pydub/ffmpeg required for convert_audio_file_to_mp3")
+
+    from pydub import AudioSegment
+
+    if output_path is None:
+        base, _ = os.path.splitext(input_path)
+        output_path = f"{base}.mp3"
+
+    audio_seg = AudioSegment.from_file(input_path)
+    _maybe_log_seg_levels("file->mp3 pre-export", audio_seg)
+    audio_seg.export(output_path, format="mp3", bitrate=bitrate)
+    return output_path
 
