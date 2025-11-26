@@ -2,6 +2,7 @@
 import logging
 from typing import List, Optional, Tuple
 
+import torch
 import torchaudio
 
 from ..chunking.types import ContentType, ChunkInfo
