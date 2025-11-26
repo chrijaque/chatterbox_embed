@@ -2779,17 +2779,12 @@ class ChatterboxTTS:
                     # Lazy import to avoid circular dependency
                     from .vc import resolve_bucket_name, is_r2_bucket
                     
-                    # Resolve bucket from metadata hints
+                    # Resolve bucket from metadata hints (non-R2 bucket names are ignored)
                     bucket_hint = (metadata or {}).get('bucket_name') if isinstance(metadata, dict) else None
                     country_hint = (metadata or {}).get('country_code') if isinstance(metadata, dict) else None
                     resolved_bucket = resolve_bucket_name(bucket_hint, country_hint)
                     
-                    # Only R2 is supported - verify bucket is R2
-                    if not is_r2_bucket(resolved_bucket):
-                        error_msg = f"Only R2 storage is supported. Bucket '{resolved_bucket}' is not an R2 bucket. Expected 'daezend-public-content'."
-                        logger.error(f"❌ {error_msg}")
-                        raise ValueError(error_msg)
-                    
+                    # resolve_bucket_name() always returns an R2 bucket (ignores non-R2 bucket names)
                     logger.info(f"    - Using R2 download (bucket={resolved_bucket})")
                     profile_bytes = self._download_from_r2(profile_path)
                     if not profile_bytes:

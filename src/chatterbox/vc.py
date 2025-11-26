@@ -46,12 +46,16 @@ def resolve_bucket_name(bucket_name: Optional[str] = None, country_code: Optiona
     
     Returns the R2 bucket name (defaults to 'daezend-public-content').
     The country_code parameter is ignored as we only use a single R2 bucket.
+    Non-R2 bucket names are ignored and the default R2 bucket is returned.
     
-    :param bucket_name: Optional explicit bucket name (will be validated as R2)
+    :param bucket_name: Optional explicit bucket name (will be validated as R2, ignored if not R2)
     :param country_code: Ignored (kept for API compatibility)
     :return: R2 bucket name
     """
     import os as _os
+    import logging
+    
+    logger = logging.getLogger(__name__)
     
     # Default R2 bucket
     default_r2_bucket = _os.getenv('R2_BUCKET_NAME', 'daezend-public-content')
@@ -66,9 +70,11 @@ def resolve_bucket_name(bucket_name: Optional[str] = None, country_code: Optiona
         if '/' in bn:
             bn = bn.split('/')[0]
         # Validate it's an R2 bucket
-        if not is_r2_bucket(bn):
-            raise ValueError(f"Only R2 storage is supported. Bucket '{bn}' is not an R2 bucket. Expected 'daezend-public-content'.")
-        return bn
+        if is_r2_bucket(bn):
+            return bn
+        else:
+            # Non-R2 bucket name provided (likely old Firebase bucket) - ignore and use default R2 bucket
+            logger.warning(f"⚠️ Non-R2 bucket name '{bn}' provided (likely legacy Firebase bucket). Ignoring and using default R2 bucket '{default_r2_bucket}'.")
     
     # Return default R2 bucket
     return default_r2_bucket
