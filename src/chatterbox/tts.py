@@ -237,6 +237,8 @@ class ChatterboxTTS:
         ).to(device=self.device)
         
         self._cached_conditionals = Conditionals(t3_cond, s3gen_ref_dict)
+        # Also update self.conds for backward compatibility with generate_chunks
+        self.conds = self._cached_conditionals
         logger.info(f"✅ Conditionals prepared using voice profile from {voice_profile_path}")
     
     def prepare_conditionals_with_saved_voice(self, saved_voice_path: str, prompt_audio_path: str, exaggeration=0.5):
@@ -295,6 +297,8 @@ class ChatterboxTTS:
         ).to(device=self.device)
         
         self._cached_conditionals = Conditionals(t3_cond, s3gen_ref_dict)
+        # Also update self.conds for backward compatibility with generate_chunks
+        self.conds = self._cached_conditionals
         logger.info(f"✅ Conditionals prepared using saved voice from {saved_voice_path}")
 
     def prepare_conditionals_with_audio_prompt(self, wav_fpath, exaggeration=0.5):
@@ -325,6 +329,8 @@ class ChatterboxTTS:
             emotion_adv=exaggeration * torch.ones(1, 1, 1),
         ).to(device=self.device)
         self._cached_conditionals = Conditionals(t3_cond, s3gen_ref_dict)
+        # Also update self.conds for backward compatibility with generate_chunks
+        self.conds = self._cached_conditionals
         logger.info(f"✅ Conditionals prepared using audio prompt from {wav_fpath}")
     
     def clear_conditional_cache(self):
@@ -464,7 +470,11 @@ class ChatterboxTTS:
     def load_voice_profile(self, path: str):
         """Load a complete voice profile with custom format including voice encoder embedding"""
         import numpy as np
+        logger.info(f"📂 Loading voice profile from {path}")
         data = np.load(path, allow_pickle=True).item()
+        
+        # Log what keys are present for debugging
+        logger.info(f"  - Profile keys: {list(data.keys())}")
         
         # Create VoiceProfile object
         profile = VoiceProfile(
@@ -478,7 +488,16 @@ class ChatterboxTTS:
         # Add voice encoder embedding if present
         if "ve_embedding" in data:
             profile.ve_embedding = torch.from_numpy(data["ve_embedding"]).to(self.device)
-            
+            logger.info(f"  - VoiceEncoder embedding loaded: shape={profile.ve_embedding.shape}")
+        else:
+            logger.warning(f"  - No VoiceEncoder embedding found in profile")
+            profile.ve_embedding = None
+        
+        logger.info(f"✅ Voice profile loaded successfully")
+        logger.info(f"  - Embedding shape: {profile.embedding.shape}")
+        logger.info(f"  - Prompt token shape: {profile.prompt_token.shape if profile.prompt_token is not None else None}")
+        logger.info(f"  - Prompt feat shape: {profile.prompt_feat.shape if profile.prompt_feat is not None else None}")
+        
         return profile
 
     @classmethod

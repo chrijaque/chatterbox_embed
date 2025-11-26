@@ -97,10 +97,6 @@ class ChatterboxVC:
             'save_voice_profile', 
             'load_voice_profile',
             'set_voice_profile',
-            'tensor_to_mp3_bytes',
-            'tensor_to_audiosegment',
-            'tensor_to_wav_bytes',
-            'convert_audio_file_to_mp3'
         ]
         
         available_methods = [m for m in dir(self) if not m.startswith('_')]
@@ -115,6 +111,9 @@ class ChatterboxVC:
             logger.error(f"❌ MISSING METHODS: {missing_methods}")
         else:
             logger.info(f"✅ All expected methods are available!")
+        
+        # Note: tensor_to_mp3_bytes, tensor_to_audiosegment, tensor_to_wav_bytes, 
+        # and convert_audio_file_to_mp3 are now imported functions, not instance methods
 
     @classmethod
     def from_local(cls, ckpt_dir, device) -> 'ChatterboxVC':
