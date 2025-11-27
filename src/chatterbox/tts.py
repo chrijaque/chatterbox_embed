@@ -5,12 +5,11 @@ import logging
 import time
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
-from typing import List, Optional, Tuple, Dict, Union
+from typing import List, Optional, Tuple, Dict, Union, Any
 from datetime import datetime
 
 import librosa
 import torch
-import perth
 import torch.nn.functional as F
 from huggingface_hub import hf_hub_download
 from safetensors.torch import load_file
@@ -35,6 +34,7 @@ from .chunking import ContentType, ChunkInfo, SmartChunker, AdvancedTextSanitize
 from .parameters import AdaptiveParameterManager
 from .quality import QualityScore, ChunkQualityAnalyzer
 from .stitching import AdvancedStitcher
+from .watermarking import BaseWatermarker, PerthWatermarker, NoOpWatermarker
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -52,6 +52,7 @@ class ChatterboxTTS:
         tokenizer: EnTokenizer,
         device: str,
         conds: Conditionals = None,
+        watermarker: Optional[BaseWatermarker] = None,
     ):
         self.sr = S3GEN_SR  # sample rate of synthesized audio
         self.t3 = t3
@@ -60,7 +61,14 @@ class ChatterboxTTS:
         self.tokenizer = tokenizer
         self.device = device
         self.conds = conds
-        self.watermarker = perth.PerthImplicitWatermarker()
+        
+        # Initialize watermarker (default to Perth, or use custom)
+        if watermarker is None:
+            self.watermarker = PerthWatermarker()
+        else:
+            if not isinstance(watermarker, BaseWatermarker):
+                raise TypeError(f"watermarker must be an instance of BaseWatermarker, got {type(watermarker)}")
+            self.watermarker = watermarker
         
         # Initialize smart chunking and adaptive parameters
         self.smart_chunker = SmartChunker()
@@ -333,6 +341,24 @@ class ChatterboxTTS:
         self.conds = self._cached_conditionals
         logger.info(f"✅ Conditionals prepared using audio prompt from {wav_fpath}")
     
+    def remove_dc_offset_numpy(self, audio_np: np.ndarray) -> np.ndarray:
+        """Remove DC offset from numpy audio array to prevent popping sounds"""
+        try:
+            if audio_np.ndim == 1:
+                # Mono audio
+                dc_offset = np.mean(audio_np)
+                return audio_np - dc_offset
+            elif audio_np.ndim == 2:
+                # Multi-channel audio (channels, samples)
+                dc_offset = np.mean(audio_np, axis=-1, keepdims=True)
+                return audio_np - dc_offset
+            else:
+                logger.warning(f"Unexpected audio shape for DC offset removal: {audio_np.shape}")
+                return audio_np
+        except Exception as e:
+            logger.warning(f"DC offset removal failed: {e}, returning original audio")
+            return audio_np
+    
     def clear_conditional_cache(self):
         """Clear the conditional cache to free memory"""
         logger.info("🧹 Clearing conditional cache")
@@ -412,7 +438,7 @@ class ChatterboxTTS:
         if (builtin_voice := ckpt_dir / "conds.pt").exists():
             conds = Conditionals.load(builtin_voice, map_location=map_location).to(device)
 
-        return cls(t3, s3gen, ve, tokenizer, device, conds=conds)
+        return cls(t3, s3gen, ve, tokenizer, device, conds=conds, watermarker=None)
 
     def save_voice_clone(self, audio_file_path: str, save_path: str):
         """Save a voice embedding from an audio file for fast reuse"""
@@ -1087,7 +1113,8 @@ class ChatterboxTTS:
 
     def generate_long_text(self, text: str, voice_profile_path: str, output_path: str, 
                           max_chars: int = 500, pause_ms: int = 100, temperature: float = 0.8,
-                          exaggeration: float = 0.5, cfg_weight: float = 0.5, pause_scale: float = 1.0) -> Tuple[torch.Tensor, int, Dict]:
+                          exaggeration: float = 0.5, cfg_weight: float = 0.5, pause_scale: float = 1.0,
+                          watermark_metadata: Optional[Dict[str, Any]] = None) -> Tuple[torch.Tensor, int, Dict]:
         """
         Full TTS pipeline for long texts: chunk → generate → stitch → clean.
 
@@ -1130,7 +1157,16 @@ class ChatterboxTTS:
         # Apply watermark once on final audio
         try:
             final_np = audio_tensor.squeeze(0).detach().cpu().numpy()
-            final_np = self.watermarker.apply_watermark(final_np, sample_rate=sample_rate)
+            
+            # Remove DC offset BEFORE watermark to prevent popping sounds
+            final_np = self.remove_dc_offset_numpy(final_np)
+            
+            # Apply watermark with optional metadata
+            final_np = self.watermarker.apply_watermark(final_np, sample_rate=sample_rate, metadata=watermark_metadata)
+            
+            # Remove DC offset AFTER watermark (watermark might introduce it)
+            final_np = self.remove_dc_offset_numpy(final_np)
+            
             audio_tensor = torch.from_numpy(final_np).unsqueeze(0)
         except Exception as e:
             logger.warning(f"⚠️ Failed to apply final watermark: {e}")
@@ -1261,6 +1297,21 @@ class ChatterboxTTS:
             
             # Step 2: Generate TTS audio
             logger.info(f"  - Step 2: Generating TTS audio...")
+            
+            # Build watermark metadata from available parameters
+            watermark_metadata = {
+                "user_id": user_id,
+                "story_id": story_id,
+                "voice_id": voice_id,
+                "voice_name": voice_name,
+                "language": language,
+                "story_type": story_type,
+            }
+            # Add any additional metadata if provided
+            if metadata and isinstance(metadata, dict):
+                watermark_metadata.update({k: v for k, v in metadata.items() 
+                                         if k not in watermark_metadata and isinstance(v, (str, int, float, bool))})
+            
             audio_tensor, sample_rate, generation_metadata = self.generate_long_text(
                 text=text,
                 voice_profile_path=temp_profile_path,
@@ -1270,7 +1321,8 @@ class ChatterboxTTS:
                 temperature=0.8,
                 exaggeration=0.5,
                 cfg_weight=0.5,
-                pause_scale=pause_scale
+                pause_scale=pause_scale,
+                watermark_metadata=watermark_metadata
             )
             
             # Step 3: Convert to MP3 bytes
@@ -1552,7 +1604,8 @@ class ChatterboxTTS:
     def generate_long_text_with_saved_voice(self, text: str, saved_voice_path: str, audio_prompt_path: str, 
                                           output_path: str, max_chars: int = 500, pause_ms: int = 100, 
                                           temperature: float = 0.8, exaggeration: float = 0.5, 
-                                          cfg_weight: float = 0.5, pause_scale: float = 1.0) -> Tuple[torch.Tensor, int, Dict]:
+                                          cfg_weight: float = 0.5, pause_scale: float = 1.0,
+                                          watermark_metadata: Optional[Dict[str, Any]] = None) -> Tuple[torch.Tensor, int, Dict]:
         """
         Generate long text TTS using saved voice + audio prompt with conditional caching optimization.
         
@@ -1609,7 +1662,16 @@ class ChatterboxTTS:
         # Apply watermark once on final audio
         try:
             final_np = audio_tensor.squeeze(0).detach().cpu().numpy()
-            final_np = self.watermarker.apply_watermark(final_np, sample_rate=sample_rate)
+            
+            # Remove DC offset BEFORE watermark to prevent popping sounds
+            final_np = self.remove_dc_offset_numpy(final_np)
+            
+            # Apply watermark with optional metadata
+            final_np = self.watermarker.apply_watermark(final_np, sample_rate=sample_rate, metadata=watermark_metadata)
+            
+            # Remove DC offset AFTER watermark (watermark might introduce it)
+            final_np = self.remove_dc_offset_numpy(final_np)
+            
             audio_tensor = torch.from_numpy(final_np).unsqueeze(0)
         except Exception as e:
             logger.warning(f"⚠️ Failed to apply final watermark: {e}")
@@ -1630,7 +1692,8 @@ class ChatterboxTTS:
     def generate_long_text_with_audio_prompt(self, text: str, audio_prompt_path: str, output_path: str,
                                            max_chars: int = 500, pause_ms: int = 100, temperature: float = 0.8,
                                            exaggeration: float = 0.5, cfg_weight: float = 0.5, 
-                                           pause_scale: float = 1.0) -> Tuple[torch.Tensor, int, Dict]:
+                                           pause_scale: float = 1.0,
+                                           watermark_metadata: Optional[Dict[str, Any]] = None) -> Tuple[torch.Tensor, int, Dict]:
         """
         Generate long text TTS using audio prompt with conditional caching optimization.
         
@@ -1685,7 +1748,16 @@ class ChatterboxTTS:
         # Apply watermark once on final audio
         try:
             final_np = audio_tensor.squeeze(0).detach().cpu().numpy()
-            final_np = self.watermarker.apply_watermark(final_np, sample_rate=sample_rate)
+            
+            # Remove DC offset BEFORE watermark to prevent popping sounds
+            final_np = self.remove_dc_offset_numpy(final_np)
+            
+            # Apply watermark with optional metadata
+            final_np = self.watermarker.apply_watermark(final_np, sample_rate=sample_rate, metadata=watermark_metadata)
+            
+            # Remove DC offset AFTER watermark (watermark might introduce it)
+            final_np = self.remove_dc_offset_numpy(final_np)
+            
             audio_tensor = torch.from_numpy(final_np).unsqueeze(0)
         except Exception as e:
             logger.warning(f"⚠️ Failed to apply final watermark: {e}")
