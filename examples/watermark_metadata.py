@@ -144,3 +144,4 @@ if __name__ == "__main__":
     print("      to embed data imperceptibly in high-frequency components.")
     print("=" * 60)
 
+

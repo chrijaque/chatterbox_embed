@@ -139,3 +139,4 @@ if __name__ == "__main__":
     # tts = ChatterboxTTS.from_pretrained(device='cuda')
     # # watermarker is automatically PerthWatermarker()
 
+
