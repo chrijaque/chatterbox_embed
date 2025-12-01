@@ -12,6 +12,7 @@ import scipy.signal
 
 import librosa
 import torch
+import perth
 import torchaudio
 from huggingface_hub import hf_hub_download
 from safetensors.torch import load_file
@@ -29,7 +30,6 @@ from .text.normalization import punc_norm
 from .storage.bucket_resolver import resolve_bucket_name, is_r2_bucket
 from .storage.r2_storage import upload_to_r2, init_firestore_client
 from .audio.conversion import tensor_to_mp3_bytes, tensor_to_audiosegment, tensor_to_wav_bytes, convert_audio_file_to_mp3
-from .watermarking import BaseWatermarker, PerthWatermarker
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -49,7 +49,6 @@ class ChatterboxVC:
         tokenizer,  # Add tokenizer
         device: str,
         ref_dict: dict=None,
-        watermarker: BaseWatermarker = None,
     ):
         logger.info(f"🔧 ChatterboxVC.__init__ called")
         logger.info(f"  - t3 type: {type(t3)}")
@@ -65,14 +64,7 @@ class ChatterboxVC:
         self.ve = ve
         self.tokenizer = tokenizer
         self.device = device
-        
-        # Initialize watermarker (default to Perth, or use custom)
-        if watermarker is None:
-            self.watermarker = PerthWatermarker()
-        else:
-            if not isinstance(watermarker, BaseWatermarker):
-                raise TypeError(f"watermarker must be an instance of BaseWatermarker, got {type(watermarker)}")
-            self.watermarker = watermarker
+        self.watermarker = perth.PerthImplicitWatermarker()
         
         if ref_dict is None:
             self.ref_dict = None

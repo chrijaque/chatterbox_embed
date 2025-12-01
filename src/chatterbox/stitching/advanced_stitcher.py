@@ -112,63 +112,21 @@ class AdvancedStitcher:
         
         return processed_segment
     
-    def remove_dc_offset(self, segment):
-        """Remove DC offset from audio segment to prevent popping sounds"""
-        if not PYDUB_AVAILABLE:
-            return segment
-        try:
-            import numpy as np
-            
-            # Convert to numpy for DC offset removal
-            samples = np.array(segment.get_array_of_samples(), dtype=np.float32)
-            
-            if segment.channels == 2:
-                # Stereo: remove DC offset per channel
-                samples = samples.reshape((-1, 2))
-                dc_offset = np.mean(samples, axis=0)
-                samples = samples - dc_offset
-                samples = samples.reshape(-1)
-            else:
-                # Mono: remove DC offset
-                dc_offset = np.mean(samples)
-                samples = samples - dc_offset
-            
-            # Convert back to int16 and create AudioSegment
-            samples_int16 = np.clip(samples, -32768, 32767).astype(np.int16)
-            segment_no_dc = AudioSegment(
-                samples_int16.tobytes(),
-                frame_rate=segment.frame_rate,
-                sample_width=segment.sample_width,
-                channels=segment.channels
-            )
-            
-            return segment_no_dc
-            
-        except Exception as e:
-            logger.warning(f"DC offset removal failed: {e}, returning original segment")
-            return segment
-    
     def normalize_segment_levels(self, segment, target_lufs: float = -23.0):
-        """Normalize audio segment to target LUFS level with DC offset removal"""
+        """Normalize audio segment to target LUFS level"""
         if not PYDUB_AVAILABLE:
             return segment
         try:
-            # First remove DC offset to prevent popping sounds
-            segment_no_dc = self.remove_dc_offset(segment)
-            
-            # Then apply peak normalization
-            normalized = effects.normalize(segment_no_dc)
+            # Use pydub's normalize function as a starting point
+            normalized = effects.normalize(segment)
 
+            # Remove additional RMS/LUFS-based attenuation to avoid reducing output volume
             # Returning the peak-normalized segment preserves dynamics while preventing clipping
             return normalized
             
         except Exception as e:
             logger.warning(f"Level normalization failed: {e}, using basic normalize")
-            try:
-                segment_no_dc = self.remove_dc_offset(segment)
-                return effects.normalize(segment_no_dc)
-            except Exception:
-                return effects.normalize(segment)
+            return effects.normalize(segment)
 
     def _ffmpeg_available(self) -> bool:
         try:
@@ -213,12 +171,9 @@ class AdvancedStitcher:
             processing_stats = []
             
             for i, (wav_path, chunk_info) in enumerate(zip(wav_paths, chunk_infos)):
-                # Load individual segment
+                # Load and normalize individual segment
                 segment = AudioSegment.from_wav(wav_path)
                 original_duration = len(segment)
-                
-                # Remove DC offset first to prevent popping sounds
-                segment = self.remove_dc_offset(segment)
                 
                 # Apply smart fades
                 prev_chunk = chunk_infos[i-1] if i > 0 else None
