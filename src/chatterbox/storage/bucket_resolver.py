@@ -12,14 +12,14 @@ logger = logging.getLogger(__name__)
 
 def is_r2_bucket(bucket_name: str) -> bool:
     """Check if bucket name indicates R2 storage."""
-    return bucket_name == 'daezend-public-content' or bucket_name.startswith('r2://')
+    return bucket_name == 'minstraly-storage' or bucket_name.startswith('r2://')
 
 
 def resolve_bucket_name(bucket_name: Optional[str] = None, country_code: Optional[str] = None) -> str:
     """
     Resolve R2 bucket name. Only R2 storage is supported.
     
-    Returns the R2 bucket name (defaults to 'daezend-public-content').
+    Returns the R2 bucket name (defaults to 'minstraly-storage').
     The country_code parameter is ignored as we only use a single R2 bucket.
     Non-R2 bucket names are ignored and the default R2 bucket is returned.
     
@@ -28,7 +28,7 @@ def resolve_bucket_name(bucket_name: Optional[str] = None, country_code: Optiona
     :return: R2 bucket name
     """
     # Default R2 bucket
-    default_r2_bucket = os.getenv('R2_BUCKET_NAME', 'daezend-public-content')
+    default_r2_bucket = os.getenv('R2_BUCKET_NAME', 'minstraly-storage')
     
     if bucket_name:
         # Clean up the bucket name

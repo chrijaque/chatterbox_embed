@@ -611,7 +611,7 @@ print(f"Extracted watermark: {watermark}")
 # Disclaimer
 Don't use this model to do bad things. Prompts are sourced from freely available data on the internet.
 
-## Redis Worker Integration (Daezend)
+## Redis Worker Integration (Minstraly)
 
 This repo includes a Redis Streams worker for Daezend integration that consumes jobs from the API app and writes outputs to Firebase. See `src/chatterbox/worker_redis.py`.
 

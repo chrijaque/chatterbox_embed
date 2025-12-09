@@ -1173,7 +1173,7 @@ class ChatterboxTTS:
 
             # Only R2 is supported - verify bucket is R2
             if not is_r2_bucket(resolved_bucket):
-                error_msg = f"Only R2 storage is supported. Bucket '{resolved_bucket}' is not an R2 bucket. Expected 'daezend-public-content'."
+                error_msg = f"Only R2 storage is supported. Bucket '{resolved_bucket}' is not an R2 bucket. Expected 'minstraly-storage'."
                 logger.error(f"❌ {error_msg}")
                 raise ValueError(error_msg)
             
@@ -1327,7 +1327,7 @@ class ChatterboxTTS:
                     destination_blob_name=r2_path,
                     content_type="audio/mpeg",
                     metadata={
-                        "bucket_name": "daezend-public-content",  # Always R2 for user stories
+                        "bucket_name": "minstraly-storage",  # Always R2 for user stories
                         "user_id": user_id,
                         "story_id": story_id,
                         "voice_id": voice_id,

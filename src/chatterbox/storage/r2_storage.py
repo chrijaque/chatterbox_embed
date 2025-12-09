@@ -52,7 +52,7 @@ def upload_to_r2(data: bytes, destination_key: str, content_type: str = "applica
         r2_secret_access_key = os.getenv('R2_SECRET_ACCESS_KEY')
         r2_endpoint = os.getenv('R2_ENDPOINT')
         # Use provided bucket_name or fall back to environment variable
-        r2_bucket_name = bucket_name or os.getenv('R2_BUCKET_NAME', 'daezend-public-content')
+        r2_bucket_name = bucket_name or os.getenv('R2_BUCKET_NAME', 'minstraly-storage')
         r2_public_url = os.getenv('NEXT_PUBLIC_R2_PUBLIC_URL') or os.getenv('R2_PUBLIC_URL')
         
         if not all([r2_account_id, r2_access_key_id, r2_secret_access_key, r2_endpoint]):
@@ -122,7 +122,7 @@ def download_from_r2(source_key: str) -> Optional[bytes]:
         r2_access_key_id = os.getenv('R2_ACCESS_KEY_ID')
         r2_secret_access_key = os.getenv('R2_SECRET_ACCESS_KEY')
         r2_endpoint = os.getenv('R2_ENDPOINT')
-        r2_bucket_name = os.getenv('R2_BUCKET_NAME', 'daezend-public-content')
+        r2_bucket_name = os.getenv('R2_BUCKET_NAME', 'minstraly-storage')
         
         if not all([r2_account_id, r2_access_key_id, r2_secret_access_key, r2_endpoint]):
             logger.error("❌ R2 credentials not configured")

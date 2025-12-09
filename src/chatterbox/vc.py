@@ -797,7 +797,7 @@ class ChatterboxVC:
 
             # Only R2 is supported - verify bucket is R2
             if not is_r2_bucket(resolved_bucket):
-                error_msg = f"Only R2 storage is supported. Bucket '{resolved_bucket}' is not an R2 bucket. Expected 'daezend-public-content'."
+                error_msg = f"Only R2 storage is supported. Bucket '{resolved_bucket}' is not an R2 bucket. Expected 'minstraly-storage'."
                 logger.error(f"❌ {error_msg}")
                 raise ValueError(error_msg)
             
@@ -994,7 +994,7 @@ class ChatterboxVC:
             
             # Set R2 bucket in metadata for routing - remove country_code to prevent Firebase fallback
             enriched_with_r2 = enriched.copy()
-            enriched_with_r2["bucket_name"] = "daezend-public-content"
+            enriched_with_r2["bucket_name"] = "minstraly-storage"
             enriched_with_r2.pop("country_code", None)  # Remove country_code to force R2 routing
             logger.info(f"🔍 DEBUG: enriched_with_r2 before upload: bucket_name={enriched_with_r2.get('bucket_name')}, keys={list(enriched_with_r2.keys())}")
             
@@ -1124,7 +1124,7 @@ class ChatterboxVC:
                         'recorded_path': recorded_path_for_response or '',
                     }
 
-                    secret = os.getenv('DAEZEND_API_SHARED_SECRET')
+                    secret = os.getenv('MINSTRALY_API_SHARED_SECRET')
                     parsed = urlparse(cb_url)
                     path = parsed.path or '/api/voice-clone/callback'
                     ts = str(int(time.time() * 1000))
@@ -1134,8 +1134,8 @@ class ChatterboxVC:
                         prefix = f"POST\n{path}\n{ts}\n".encode('utf-8')
                         sig = hmac.new(secret.encode('utf-8'), prefix + body, hashlib.sha256).hexdigest()
                         headers.update({
-                            'X-Daezend-Timestamp': ts,
-                            'X-Daezend-Signature': sig,
+                            'X-Minstraly-Timestamp': ts,
+                            'X-Minstraly-Signature': sig,
                         })
                     req = Request(cb_url, data=body, headers=headers, method='POST')
                     try:
@@ -1194,7 +1194,7 @@ class ChatterboxVC:
                         'error': str(e),
                     }
 
-                    secret = os.getenv('DAEZEND_API_SHARED_SECRET')
+                    secret = os.getenv('MINSTRALY_API_SHARED_SECRET')
                     parsed = urlparse(cb_url)
                     path = parsed.path or '/api/voice-clone/callback'
                     ts = str(int(time.time() * 1000))
@@ -1204,8 +1204,8 @@ class ChatterboxVC:
                         prefix = f"POST\n{path}\n{ts}\n".encode('utf-8')
                         sig = hmac.new(secret.encode('utf-8'), prefix + body, hashlib.sha256).hexdigest()
                         headers.update({
-                            'X-Daezend-Timestamp': ts,
-                            'X-Daezend-Signature': sig,
+                            'X-Minstraly-Timestamp': ts,
+                            'X-Minstraly-Signature': sig,
                         })
                     req = Request(cb_url, data=body, headers=headers, method='POST')
                     try:
