@@ -529,8 +529,8 @@ class ChatterboxTTS:
         saved_voice_path=None,
         voice_profile_path=None,
         exaggeration=0.5,
-        cfg_weight=0.5,
-        temperature=0.8,
+        cfg_weight=0.3,
+        temperature=0.6,
     ):
         # Use conditional caching/preparation only when necessary. If conditionals
         # are already prepared, reuse them to avoid heavy recomputation per chunk.
@@ -596,8 +596,8 @@ class ChatterboxTTS:
         repetition_penalty=1.2,
         min_p=0.05,
         top_p=1.0,
-        cfg_weight=0.5,
-        temperature=0.8,
+        cfg_weight=0.3,
+        temperature=0.6,
         max_new_tokens_override: Optional[int] = None,
     ):
         """
@@ -806,8 +806,8 @@ class ChatterboxTTS:
                         text=chunk_info.text,
                         conditionals=pre_prepared_conditionals,
                         exaggeration=adaptive_params.get("exaggeration"),
-                        temperature=adaptive_params.get("temperature", 0.8),
-                        cfg_weight=adaptive_params.get("cfg_weight", 0.5),
+                        temperature=adaptive_params.get("temperature", 0.6),
+                        cfg_weight=adaptive_params.get("cfg_weight", 0.3),
                         repetition_penalty=adaptive_params.get("repetition_penalty", 1.2),
                         min_p=adaptive_params.get("min_p", 0.05),
                         top_p=adaptive_params.get("top_p", 1.0),
@@ -853,8 +853,8 @@ class ChatterboxTTS:
                         text=chunk_info.text,
                         conditionals=pre_prepared_conditionals,
                         exaggeration=adaptive_params.get("exaggeration"),
-                        temperature=adaptive_params.get("temperature", 0.8),
-                        cfg_weight=adaptive_params.get("cfg_weight", 0.5),
+                        temperature=adaptive_params.get("temperature", 0.6),
+                        cfg_weight=adaptive_params.get("cfg_weight", 0.3),
                         repetition_penalty=adaptive_params.get("repetition_penalty", 1.2),
                         min_p=adaptive_params.get("min_p", 0.05),
                         top_p=adaptive_params.get("top_p", 1.0),
@@ -932,8 +932,8 @@ class ChatterboxTTS:
         return [(wav_path, quality_score) for _, wav_path, quality_score in results]
     
     def generate_chunks(self, chunk_infos: List[ChunkInfo], voice_profile_path: str,
-                       base_temperature: float = 0.8, base_exaggeration: float = 0.5, 
-                       base_cfg_weight: float = 0.5) -> List[str]:
+                       base_temperature: float = 0.6, base_exaggeration: float = 0.5, 
+                       base_cfg_weight: float = 0.3) -> List[str]:
         """
         Advanced chunk generation with parallel processing and quality analysis.
         Now optimized with conditional caching for improved performance.
@@ -1086,7 +1086,7 @@ class ChatterboxTTS:
                 logger.warning(f"⚠️ Failed to delete {path} — {e}")
 
     def generate_long_text(self, text: str, voice_profile_path: str, output_path: str, 
-                          max_chars: int = 500, pause_ms: int = 100, temperature: float = 0.8,
+                          max_chars: int = 500, pause_ms: int = 100, temperature: float = 0.6,
                           exaggeration: float = 0.5, cfg_weight: float = 0.5, pause_scale: float = 1.0) -> Tuple[torch.Tensor, int, Dict]:
         """
         Full TTS pipeline for long texts: chunk → generate → stitch → clean.
@@ -1446,8 +1446,8 @@ class ChatterboxTTS:
             }
 
     def generate_chunks_with_saved_voice(self, chunk_infos: List[ChunkInfo], saved_voice_path: str, 
-                                       audio_prompt_path: str, base_temperature: float = 0.8, 
-                                       base_exaggeration: float = 0.5, base_cfg_weight: float = 0.5) -> List[str]:
+                                       audio_prompt_path: str, base_temperature: float = 0.6, 
+                                       base_exaggeration: float = 0.5, base_cfg_weight: float = 0.3) -> List[str]:
         """
         Generate chunks using saved voice + audio prompt with conditional caching optimization.
         
@@ -1480,8 +1480,8 @@ class ChatterboxTTS:
         return wav_paths
     
     def generate_chunks_with_audio_prompt(self, chunk_infos: List[ChunkInfo], audio_prompt_path: str,
-                                        base_temperature: float = 0.8, base_exaggeration: float = 0.5, 
-                                        base_cfg_weight: float = 0.5) -> List[str]:
+                                        base_temperature: float = 0.6, base_exaggeration: float = 0.5, 
+                                        base_cfg_weight: float = 0.3) -> List[str]:
         """
         Generate chunks using audio prompt with conditional caching optimization.
         
@@ -1551,8 +1551,8 @@ class ChatterboxTTS:
 
     def generate_long_text_with_saved_voice(self, text: str, saved_voice_path: str, audio_prompt_path: str, 
                                           output_path: str, max_chars: int = 500, pause_ms: int = 100, 
-                                          temperature: float = 0.8, exaggeration: float = 0.5, 
-                                          cfg_weight: float = 0.5, pause_scale: float = 1.0) -> Tuple[torch.Tensor, int, Dict]:
+                                          temperature: float = 0.6, exaggeration: float = 0.5, 
+                                          cfg_weight: float = 0.3, pause_scale: float = 1.0) -> Tuple[torch.Tensor, int, Dict]:
         """
         Generate long text TTS using saved voice + audio prompt with conditional caching optimization.
         
@@ -1628,8 +1628,8 @@ class ChatterboxTTS:
         return audio_tensor, sample_rate, metadata
     
     def generate_long_text_with_audio_prompt(self, text: str, audio_prompt_path: str, output_path: str,
-                                           max_chars: int = 500, pause_ms: int = 100, temperature: float = 0.8,
-                                           exaggeration: float = 0.5, cfg_weight: float = 0.5, 
+                                           max_chars: int = 500, pause_ms: int = 100, temperature: float = 0.6,
+                                           exaggeration: float = 0.5, cfg_weight: float = 0.3, 
                                            pause_scale: float = 1.0) -> Tuple[torch.Tensor, int, Dict]:
         """
         Generate long text TTS using audio prompt with conditional caching optimization.
