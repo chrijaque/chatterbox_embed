@@ -216,6 +216,18 @@ class AdvancedStitcher:
             # Final global normalization for consistency
             normalized_combined = self.normalize_segment_levels(combined)
             
+            # CRITICAL FIX: Apply headroom to prevent clipping
+            # Normalize to -0.5 dBFS to leave headroom for MP3 encoding and prevent artifacts
+            try:
+                peak_db = normalized_combined.max_dBFS
+                if peak_db > -0.5:
+                    # Reduce gain to target -0.5 dBFS
+                    gain_reduction = peak_db - (-0.5)
+                    normalized_combined = normalized_combined.apply_gain(-gain_reduction)
+                    logger.info(f"🔊 Applied headroom: reduced gain by {gain_reduction:.2f} dB to prevent clipping")
+            except Exception as e:
+                logger.warning(f"⚠️ Could not apply headroom: {e}")
+            
             # Export to file
             logger.info(f"🎼 Exporting stitched audio to: {output_path}")
             normalized_combined.export(output_path, format="wav")

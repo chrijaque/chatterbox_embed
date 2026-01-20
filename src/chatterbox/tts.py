@@ -1187,7 +1187,10 @@ class ChatterboxTTS:
     def generate_tts_story(self, text: str, voice_id: str, profile_base64: str = "", 
                            language: str = 'en', story_type: str = 'user', 
                            is_kids_voice: bool = False, metadata: Dict = None, pause_scale: float = 1.15,
-                           *, user_id: str = "", story_id: str = "", profile_path: str = "", voice_name: str = "") -> Dict:
+                           *, user_id: str = "", story_id: str = "", profile_path: str = "", voice_name: str = "",
+                           # New optional TTS parameters
+                           temperature: float = None, exaggeration: float = None, 
+                           cfg_weight: float = None) -> Dict:
         """
         Generate TTS story with voice profile from base64.
         
@@ -1199,6 +1202,10 @@ class ChatterboxTTS:
             story_type: Type of story
             is_kids_voice: Whether it's a kids voice
             metadata: Optional metadata (for API compatibility)
+            temperature: Generation temperature (default: 0.8)
+            exaggeration: Voice exaggeration factor (default: 0.5)
+            cfg_weight: CFG weight for generation (default: 0.5)
+            pause_scale: Global pause scaling factor (default: 1.15)
             
         Returns:
             Dict with status, audio_data, storage_url (R2), storage_path (R2), story_type, and generation_time
@@ -1260,16 +1267,22 @@ class ChatterboxTTS:
             logger.info(f"    - Voice profile loaded")
             
             # Step 2: Generate TTS audio
+            # Set defaults if not provided
+            final_temperature = temperature if temperature is not None else 0.8
+            final_exaggeration = exaggeration if exaggeration is not None else 0.5
+            final_cfg_weight = cfg_weight if cfg_weight is not None else 0.5
+            
             logger.info(f"  - Step 2: Generating TTS audio...")
+            logger.info(f"  - TTS Parameters: temp={final_temperature}, exag={final_exaggeration}, cfg={final_cfg_weight}, pause_scale={pause_scale}")
             audio_tensor, sample_rate, generation_metadata = self.generate_long_text(
                 text=text,
                 voice_profile_path=temp_profile_path,
                 output_path="./temp_tts_output.wav",
                 max_chars=500,
                 pause_ms=150,
-                temperature=0.8,
-                exaggeration=0.5,
-                cfg_weight=0.5,
+                temperature=final_temperature,
+                exaggeration=final_exaggeration,
+                cfg_weight=final_cfg_weight,
                 pause_scale=pause_scale
             )
             

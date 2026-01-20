@@ -63,6 +63,14 @@ def tensor_to_audiosegment(audio_tensor: torch.Tensor, sample_rate: int):
         # Mono: (samples,) -> (1, samples)
         audio_np = audio_tensor.unsqueeze(0).numpy()
     
+    # CRITICAL FIX: Clamp audio to [-1, 1] range BEFORE conversion to prevent clipping
+    audio_np = np.clip(audio_np, -1.0, 1.0)
+    
+    # Apply headroom to prevent clipping during int16 conversion
+    # Use -0.3 dBFS (0.966) to leave headroom for MP3 encoding
+    headroom_factor = 0.966  # ~-0.3 dBFS
+    audio_np = audio_np * headroom_factor
+    
     # Convert to int16 for pydub
     audio_np = (audio_np * 32767).astype(np.int16)
     
