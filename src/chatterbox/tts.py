@@ -931,9 +931,16 @@ class ChatterboxTTS:
         results.sort(key=lambda x: x[0])
         return [(wav_path, quality_score) for _, wav_path, quality_score in results]
     
-    def generate_chunks(self, chunk_infos: List[ChunkInfo], voice_profile_path: str,
-                       base_temperature: float = 0.6, base_exaggeration: float = 0.5, 
-                       base_cfg_weight: float = 0.3) -> List[str]:
+    def generate_chunks(
+        self,
+        chunk_infos: List[ChunkInfo],
+        voice_profile_path: str,
+        base_temperature: float = 0.6,
+        base_exaggeration: float = 0.5,
+        base_cfg_weight: float = 0.3,
+        *,
+        adaptive_voice_param_blend: float = 1.0,
+    ) -> List[str]:
         """
         Advanced chunk generation with parallel processing and quality analysis.
         Now optimized with conditional caching for improved performance.
@@ -942,10 +949,18 @@ class ChatterboxTTS:
         :param voice_profile_path: Path to the voice profile (.npy)
         :param base_temperature: Base temperature (will be adapted per chunk)
         :param base_exaggeration: Base exaggeration (will be adapted per chunk)
-        :param base_cfg_weight: Base CFG weight (will be adapted per chunk)
+        :param base_cfg_weight: Base CFG weight (will be adapted/blended per chunk)
+        :param adaptive_voice_param_blend: Blend factor for adaptive per-chunk voice params (temp/exag/cfg).
+            - 1.0 (default): preserve current behavior (fully adaptive per chunk)
+            - 0.0: fully respect base_temperature/base_exaggeration/base_cfg_weight for ALL chunks
         :return: List of file paths to temporary WAV files
         """
         generation_start = time.time()
+        try:
+            adaptive_voice_param_blend = float(adaptive_voice_param_blend)
+        except Exception:
+            adaptive_voice_param_blend = 1.0
+        adaptive_voice_param_blend = max(0.0, min(1.0, adaptive_voice_param_blend))
         
         # Prepare conditionals once and reuse for all chunks to avoid recomputation
         logger.info(f"🎯 Preparing conditionals once for {len(chunk_infos)} chunks")
@@ -960,7 +975,10 @@ class ChatterboxTTS:
             logger.exception("❌ Failed to prepare conditionals")
             raise
 
-        logger.info(f"🔄 Using sequential processing with adaptive parameters for {len(chunk_infos)} chunks")
+        logger.info(
+            f"🔄 Using sequential processing with adaptive parameters for {len(chunk_infos)} chunks "
+            f"(adaptive_voice_param_blend={adaptive_voice_param_blend:.2f})"
+        )
         wav_paths = []
 
         for i, chunk_info in enumerate(chunk_infos):
@@ -969,20 +987,42 @@ class ChatterboxTTS:
             # Get adaptive parameters based on chunk content, position, and complexity
             adaptive_params = self.param_manager.get_adaptive_parameters(chunk_info)
             
-            # Log intro boost for first chunk
-            if chunk_info.is_first_chunk:
-                logger.info(f"🎬 First chunk detected - applying intro boost: "
-                          f"temp={adaptive_params['temperature']:.2f}, "
-                          f"exag={adaptive_params['exaggeration']:.2f}, "
-                          f"cfg={adaptive_params['cfg_weight']:.2f}")
+            # Determine the effective per-chunk parameters.
+            # NOTE: adaptive_params always contains temperature/exaggeration/cfg_weight, so base_* would
+            # otherwise be ignored. We blend adaptive with base to make external overrides meaningful.
+            try:
+                adaptive_temp = float(adaptive_params.get("temperature", base_temperature))
+            except Exception:
+                adaptive_temp = base_temperature
+            try:
+                adaptive_exag = float(adaptive_params.get("exaggeration", base_exaggeration))
+            except Exception:
+                adaptive_exag = base_exaggeration
+            try:
+                adaptive_cfg = float(adaptive_params.get("cfg_weight", base_cfg_weight))
+            except Exception:
+                adaptive_cfg = base_cfg_weight
+
+            temp_used = (base_temperature * (1.0 - adaptive_voice_param_blend)) + (adaptive_temp * adaptive_voice_param_blend)
+            exag_used = (base_exaggeration * (1.0 - adaptive_voice_param_blend)) + (adaptive_exag * adaptive_voice_param_blend)
+            cfg_used = (base_cfg_weight * (1.0 - adaptive_voice_param_blend)) + (adaptive_cfg * adaptive_voice_param_blend)
+
+            # Log effective params for visibility (first chunk + occasional sampling)
+            if chunk_info.is_first_chunk or (i % 8 == 0):
+                logger.info(
+                    f"🎛️ Chunk params (effective): temp={temp_used:.2f}, exag={exag_used:.2f}, cfg={cfg_used:.2f} "
+                    f"| base(temp={base_temperature:.2f}, exag={base_exaggeration:.2f}, cfg={base_cfg_weight:.2f}) "
+                    f"| adaptive(temp={adaptive_temp:.2f}, exag={adaptive_exag:.2f}, cfg={adaptive_cfg:.2f}) "
+                    f"| blend={adaptive_voice_param_blend:.2f}"
+                )
 
             # Use adaptive parameters for varied narration
             audio_tensor = self._generate_with_prepared_conditionals(
                 text=chunk_info.text,
                 conditionals=self.conds,
-                exaggeration=adaptive_params.get("exaggeration", base_exaggeration),
-                temperature=adaptive_params.get("temperature", base_temperature),
-                cfg_weight=adaptive_params.get("cfg_weight", base_cfg_weight),
+                exaggeration=exag_used,
+                temperature=temp_used,
+                cfg_weight=cfg_used,
                 repetition_penalty=adaptive_params.get("repetition_penalty", 1.2),
                 min_p=adaptive_params.get("min_p", 0.05),
                 top_p=adaptive_params.get("top_p", 1.0),
@@ -1085,9 +1125,20 @@ class ChatterboxTTS:
             except Exception as e:
                 logger.warning(f"⚠️ Failed to delete {path} — {e}")
 
-    def generate_long_text(self, text: str, voice_profile_path: str, output_path: str, 
-                          max_chars: int = 500, pause_ms: int = 100, temperature: float = 0.6,
-                          exaggeration: float = 0.5, cfg_weight: float = 0.5, pause_scale: float = 1.0) -> Tuple[torch.Tensor, int, Dict]:
+    def generate_long_text(
+        self,
+        text: str,
+        voice_profile_path: str,
+        output_path: str,
+        max_chars: int = 500,
+        pause_ms: int = 100,
+        temperature: float = 0.6,
+        exaggeration: float = 0.5,
+        cfg_weight: float = 0.5,
+        pause_scale: float = 1.0,
+        *,
+        adaptive_voice_param_blend: float = 1.0,
+    ) -> Tuple[torch.Tensor, int, Dict]:
         """
         Full TTS pipeline for long texts: chunk → generate → stitch → clean.
 
@@ -1120,7 +1171,14 @@ class ChatterboxTTS:
         except Exception:
             logger.warning("⚠️ Failed to apply pause_scale; using default 1.0")
         
-        wav_paths = self.generate_chunks(chunk_infos, voice_profile_path, temperature, exaggeration, cfg_weight)
+        wav_paths = self.generate_chunks(
+            chunk_infos,
+            voice_profile_path,
+            temperature,
+            exaggeration,
+            cfg_weight,
+            adaptive_voice_param_blend=adaptive_voice_param_blend,
+        )
         if not wav_paths:
             raise RuntimeError("Failed to generate any audio chunks")
         
@@ -1190,7 +1248,8 @@ class ChatterboxTTS:
                            *, user_id: str = "", story_id: str = "", profile_path: str = "", voice_name: str = "",
                            # New optional TTS parameters
                            temperature: float = None, exaggeration: float = None, 
-                           cfg_weight: float = None) -> Dict:
+                           cfg_weight: float = None,
+                           adaptive_voice_param_blend: float = 1.0) -> Dict:
         """
         Generate TTS story with voice profile from base64.
         
@@ -1283,7 +1342,8 @@ class ChatterboxTTS:
                 temperature=final_temperature,
                 exaggeration=final_exaggeration,
                 cfg_weight=final_cfg_weight,
-                pause_scale=pause_scale
+                pause_scale=pause_scale,
+                adaptive_voice_param_blend=adaptive_voice_param_blend,
             )
             
             # Step 3: Convert to MP3 bytes
