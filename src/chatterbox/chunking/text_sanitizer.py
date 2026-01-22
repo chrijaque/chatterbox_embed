@@ -2,6 +2,20 @@
 import logging
 import re
 import unicodedata
+from typing import Dict, Optional
+
+# Optional dependencies for better text normalization.
+# We keep these optional so the package can still run without them,
+# but you should add them to requirements for best quality.
+try:
+    import inflect  # type: ignore
+except Exception:  # pragma: no cover
+    inflect = None
+
+try:
+    import contractions as _contractions  # type: ignore
+except Exception:  # pragma: no cover
+    _contractions = None
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +38,15 @@ class AdvancedTextSanitizer:
             '»': '"',
             '„': '"',
             '"': '"',
+
+            # Normalize apostrophe-like characters to ASCII apostrophe
+            # (TTS tokenizers often behave better with U+0027 than typographic variants)
+            '\u2019': "'",  # RIGHT SINGLE QUOTATION MARK
+            '\u2018': "'",  # LEFT SINGLE QUOTATION MARK
+            '\u02BC': "'",  # MODIFIER LETTER APOSTROPHE
+            '\uFF07': "'",  # FULLWIDTH APOSTROPHE
+            '\u2032': "'",  # PRIME (often mistaken for apostrophe)
+            '`': "'",        # Grave accent commonly used as apostrophe
             
             # Story section breaks
             '⁂': ' <STORY_BREAK> ',  # Special marker for longer pauses between story sections
@@ -37,6 +60,36 @@ class AdvancedTextSanitizer:
             '≠': ' not equal to ',
             '≈': ' approximately ',
             '∞': ' infinity ',
+
+            # Additional math operators / forms
+            '−': ' minus ',          # Unicode minus
+            '∙': ' times ',          # Bullet operator
+            '·': ' times ',          # Middle dot
+            '∝': ' proportional to ',
+            '∴': ' therefore ',
+            '∵': ' because ',
+
+            # Common math constructs (kept simple)
+            '√': ' square root ',
+            '∑': ' sum ',
+            '∫': ' integral ',
+
+            # Superscripts
+            '²': ' squared ',
+            '³': ' cubed ',
+            '⁴': ' to the fourth power ',
+
+            # Common greek letters
+            'π': ' pi ',
+            'Π': ' pi ',
+            'Δ': ' delta ',
+            'δ': ' delta ',
+            'λ': ' lambda ',
+            'θ': ' theta ',
+            'μ': ' mu ',
+            'σ': ' sigma ',
+            'Ω': ' omega ',
+            'ω': ' omega ',
             
             # Currency symbols
             '€': ' euros',
@@ -154,6 +207,23 @@ class AdvancedTextSanitizer:
             '****': '',  # Remove asterisk patterns
             '####': '',  # Remove hash patterns
         }
+
+        # Optional engines
+        self._inflect_engine = inflect.engine() if inflect else None
+
+        # Small digit vocabulary for decimal verbalization without heavy dependencies
+        self._digit_words: Dict[str, str] = {
+            '0': 'zero',
+            '1': 'one',
+            '2': 'two',
+            '3': 'three',
+            '4': 'four',
+            '5': 'five',
+            '6': 'six',
+            '7': 'seven',
+            '8': 'eight',
+            '9': 'nine',
+        }
     
     def _temperature_replace(self, match):
         """Convert temperature format"""
@@ -169,39 +239,369 @@ class AdvancedTextSanitizer:
             hour, minute = time_str.split(':')
             hour = int(hour)
             minute = int(minute)
+            # Prefer "oh five" over "05" since later number verbalization would
+            # otherwise turn "05" into "five" and lose the leading-zero cue.
+            if minute == 0:
+                minute_spoken = "o'clock"
+            elif minute < 10:
+                minute_spoken = f"oh {minute}"
+            else:
+                minute_spoken = f"{minute}"
             
             if hour == 0:
-                return f"twelve {minute:02d} AM"
+                return f"twelve {minute_spoken} AM"
             elif hour < 12:
-                return f"{hour} {minute:02d} AM"
+                return f"{hour} {minute_spoken} AM"
             elif hour == 12:
-                return f"twelve {minute:02d} PM"
+                return f"twelve {minute_spoken} PM"
             else:
-                return f"{hour-12} {minute:02d} PM"
+                return f"{hour-12} {minute_spoken} PM"
         except:
             return time_str
+
+    def _expand_contractions(self, text: str) -> str:
+        """
+        Expand common English contractions (you're -> you are, I'd -> I would, you've -> you have, etc.)
+        Uses the optional `contractions` library when available.
+        """
+        try:
+            if _contractions is None:
+                # Fallback: conservative, common-contraction expansion.
+                # Intentionally avoids "'s" to reduce possessive damage (John's).
+                contractions_map = {
+                    r"\b([Yy])ou're\b": r"\1ou are",
+                    r"\b([Yy])ou've\b": r"\1ou have",
+                    r"\b([Yy])ou'll\b": r"\1ou will",
+                    r"\b([Yy])ou'd\b": r"\1ou would",
+                    r"\b([Ww])e're\b": r"\1e are",
+                    r"\b([Ww])e've\b": r"\1e have",
+                    r"\b([Ww])e'll\b": r"\1e will",
+                    r"\b([Ww])e'd\b": r"\1e would",
+                    r"\b([Tt])hey're\b": r"\1hey are",
+                    r"\b([Tt])hey've\b": r"\1hey have",
+                    r"\b([Tt])hey'll\b": r"\1hey will",
+                    r"\b([Tt])hey'd\b": r"\1hey would",
+                    r"\b([Ii])'m\b": r"\1 am",
+                    r"\b([Ii])'ve\b": r"\1 have",
+                    r"\b([Ii])'ll\b": r"\1 will",
+                    # "I'd" is ambiguous (had/would). Prefer "would" for narration.
+                    r"\b([Ii])'d\b": r"\1 would",
+                    r"\b([Cc])an't\b": r"\1annot",
+                    r"\b([Ww])on't\b": r"\1ill not",
+                    r"\b([Dd])on't\b": r"\1o not",
+                    r"\b([Dd])idn't\b": r"\1id not",
+                    r"\b([Dd])oesn't\b": r"\1oes not",
+                    r"\b([Ii])sn't\b": r"\1s not",
+                    r"\b([Aa])ren't\b": r"\1re not",
+                    r"\b([Ww])eren't\b": r"\1ere not",
+                    r"\b([Ww])asn't\b": r"\1as not",
+                    r"\b([Hh])aven't\b": r"\1ave not",
+                    r"\b([Hh])asn't\b": r"\1as not",
+                    r"\b([Hh])adn't\b": r"\1ad not",
+                    r"\b([Ww])ouldn't\b": r"\1ould not",
+                    r"\b([Ss])houldn't\b": r"\1hould not",
+                    r"\b([Cc])ouldn't\b": r"\1ould not",
+                    r"\b([Mm])ustn't\b": r"\1ust not",
+                    r"\b([Ll])et's\b": r"\1et us",
+                }
+                for pat, rep in contractions_map.items():
+                    text = re.sub(pat, rep, text)
+                return text
+            # `contractions.fix` is conservative and avoids touching most possessives.
+            return _contractions.fix(text)
+        except Exception:
+            return text
+
+    def _number_to_words(self, n: int) -> str:
+        """Convert integer to words with a stable 'and' style when available."""
+        if self._inflect_engine is None:
+            return str(n)
+        try:
+            # Use "and" (e.g., 1278 -> "one thousand two hundred and seventy-eight")
+            out = self._inflect_engine.number_to_words(n, andword="and", zero="zero")
+            # inflect can include commas; remove them for TTS cleanliness
+            out = out.replace(",", "")
+            return out
+        except Exception:
+            return str(n)
+
+    def _digits_to_words(self, digits: str) -> str:
+        """Convert a digit string (e.g. '012') to 'zero one two'."""
+        return " ".join(self._digit_words.get(ch, ch) for ch in digits)
+
+    def _verbalize_simple_equations(self, text: str) -> str:
+        """
+        Lightweight equation verbalizer for common inline forms like:
+        - E=mc^{2}
+        - x_1=3.14
+        - a*b=c
+        This is intentionally NOT a full LaTeX/math parser.
+        """
+        if not text:
+            return text
+
+        # Only do equation-level rewrites when the text looks "math-ish".
+        # This avoids mangling prose that contains '-' or '/'.
+        if not any(ch in text for ch in ("=", "^", "_", "{", "}")):
+            return text
+
+        # Exponents: x^{2} / x^2
+        def _exp_repl(m: re.Match) -> str:
+            base = m.group(1)
+            exp = m.group(2)
+            if exp == "2":
+                return f"{base} squared"
+            if exp == "3":
+                return f"{base} cubed"
+            return f"{base} to the power of {exp}"
+
+        # Base can be a single letter/number or a closing paren/bracket.
+        text = re.sub(r"([A-Za-z0-9\)\]])\s*\^\s*\{\s*([0-9]+)\s*\}", _exp_repl, text)
+        text = re.sub(r"([A-Za-z0-9\)\]])\s*\^\s*([0-9]+)", _exp_repl, text)
+
+        # Subscripts: x_{1} / x_1
+        text = re.sub(r"([A-Za-z])\s*_\s*\{\s*([A-Za-z0-9]+)\s*\}", r"\1 sub \2", text)
+        text = re.sub(r"([A-Za-z])\s*_\s*([A-Za-z0-9]+)", r"\1 sub \2", text)
+
+        # Implicit multiplication between adjacent single-letter variables before we
+        # expand operators into words (so we don't accidentally split real words like "by").
+        # Target common compact variable forms around exponents, e.g. mc^{2} -> m c squared.
+        if "=" in text:
+            # If exponent is already verbalized, split the compact variable token.
+            text = re.sub(r"\b([A-Za-z])([A-Za-z])\s+(squared|cubed)\b", r"\1 \2 \3", text)
+            text = re.sub(r"\b([A-Za-z])([A-Za-z])\s+(to the power of)\b", r"\1 \2 \3", text)
+
+        # Remove leftover braces
+        text = text.replace("{", " ").replace("}", " ")
+
+        # Basic operators (keep conservative; '*' and '/' can appear in prose)
+        # Equals: allow unary minus on RHS (x=-2) but avoid assignments/paths (PATH=/usr/bin)
+        text = re.sub(
+            r"(?<=[A-Za-z0-9\)\]])\s*=\s*(?=[A-Za-z0-9\(\[\]-])",
+            " equals ",
+            text,
+        )
+        text = re.sub(r"(?<=\w)\s*\+\s*(?=\w)", " plus ", text)
+        # Subtraction: treat '-' as minus in equation contexts.
+        # We scope this to equation-like text (this function only runs when math-ish, and typically with '='),
+        # so we don't clobber prose ranges like "5-10".
+        text = re.sub(r"(?<=\w)\s*-\s*(?=\w)", " minus ", text)
+        # Handle leading negatives like "x=-2" -> "x equals minus 2"
+        text = re.sub(r"\bequals\s*-\s*(\d+)\b", r"equals minus \1", text)
+        # Multiplication when explicitly marked
+        text = re.sub(r"(?<=\w)\s*\*\s*(?=\w)", " times ", text)
+        # Division only when at least one side is numeric (avoid and/or, path/to, etc.)
+        text = re.sub(r"(\d)\s*/\s*(\w)", r"\1 divided by \2", text)
+        text = re.sub(r"(\w)\s*/\s*(\d)", r"\1 divided by \2", text)
+        # Also allow single-letter variable division in equation contexts: a/b -> a divided by b
+        text = re.sub(r"\b([A-Za-z])\s*/\s*([A-Za-z])\b", r"\1 divided by \2", text)
+
+        return text
+
+    def _year_to_words(self, year: int) -> str:
+        """
+        Convert a year to spoken form.
+        Preferences:
+        - 19xx => 'nineteen ninety-nine' (and 1905 => 'nineteen oh five')
+        - 20xx => 'two thousand and twelve'
+        - Other years => standard cardinal number (857 => 'eight hundred and fifty-seven', 1278 => 'one thousand...')
+        """
+        try:
+            y = int(year)
+        except Exception:
+            return str(year)
+
+        if y < 0:
+            return "minus " + self._year_to_words(abs(y))
+
+        # 0-999: treat as cardinal (works for "year 857")
+        if 0 <= y <= 999:
+            return self._number_to_words(y)
+
+        # 1000-1899: treat as cardinal (1278 => "one thousand two hundred and seventy-eight")
+        if 1000 <= y <= 1899:
+            return self._number_to_words(y)
+
+        # 1900-1999: "nineteen ninety-nine" style
+        if 1900 <= y <= 1999:
+            last_two = y % 100
+            if last_two == 0:
+                return "nineteen hundred"
+            if last_two < 10:
+                return "nineteen oh " + self._number_to_words(last_two)
+            return "nineteen " + self._number_to_words(last_two)
+
+        # 2000-2099: "two thousand and twelve" style
+        if 2000 <= y <= 2099:
+            last_two = y % 100
+            if last_two == 0:
+                return "two thousand"
+            return "two thousand and " + self._number_to_words(last_two)
+
+        # Default: cardinal
+        return self._number_to_words(y)
+
+    def _should_expand_numeric_token(self, text: str, start: int, end: int) -> bool:
+        """
+        Heuristic: avoid expanding numbers that look like part numbers / versions (adjacent letters).
+        """
+        left = text[start - 1] if start > 0 else ""
+        right = text[end] if end < len(text) else ""
+        if left.isalpha() or right.isalpha():
+            return False
+        return True
+
+    def _verbalize_ranges(self, text: str) -> str:
+        """
+        Convert numeric ranges like '5-10' or '2012 - 2014' to '5 to 10' / '2012 to 2014'.
+        Skips ISO dates like '2026-01-22'.
+        """
+        range_re = re.compile(r"(?<![A-Za-z])(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)(?![A-Za-z])")
+
+        def repl(m: re.Match) -> str:
+            # Skip if this looks like the start of an ISO date: YYYY-MM-DD
+            a = m.group(1)
+            b = m.group(2)
+            after = text[m.end():]
+            if len(a) == 4 and len(b) == 2 and after.startswith("-") and len(after) >= 3 and after[1:3].isdigit():
+                return m.group(0)
+            if not self._should_expand_numeric_token(text, m.start(1), m.end(1)):
+                return m.group(0)
+            if not self._should_expand_numeric_token(text, m.start(2), m.end(2)):
+                return m.group(0)
+            return f"{a} to {b}"
+
+        return range_re.sub(repl, text)
+
+    def _verbalize_decimals(self, text: str) -> str:
+        """
+        Convert decimals like '3.14' to 'three point one four'.
+        Skips semver-ish patterns like '2.1.3'.
+        """
+        # Also skip decimals that are in the middle of a multi-dot number (e.g. the "1.3" in "2.1.3")
+        dec_re = re.compile(r"(?<![A-Za-z])(?<!\d\.)(\d+)\.(\d+)(?![A-Za-z])(?!(?:\.\d))")
+
+        def repl(m: re.Match) -> str:
+            if not self._should_expand_numeric_token(text, m.start(1), m.end(2)):
+                return m.group(0)
+            int_part = int(m.group(1))
+            frac = m.group(2)
+            return f"{self._number_to_words(int_part)} point {self._digits_to_words(frac)}"
+
+        return dec_re.sub(repl, text)
+
+    def _verbalize_year_like_numbers(self, text: str) -> str:
+        """
+        Convert year-ish numbers to preferred spoken forms.
+        - Contextual 1-4 digit years after words like 'year', 'in', 'AD', etc.
+        - Standalone 4-digit years (1000-2099) are also treated as years.
+        """
+        # Context words: common in narration
+        ctx_re = re.compile(
+            r"\b(in|year|since|from|around|circa|c\.|ad|a\.d\.|bc|b\.c\.)\s+(\d{1,4})\b",
+            re.IGNORECASE,
+        )
+
+        def repl_ctx(m: re.Match) -> str:
+            prefix = m.group(1)
+            y = int(m.group(2))
+            return f"{prefix} {self._year_to_words(y)}"
+
+        text = ctx_re.sub(repl_ctx, text)
+
+        # Standalone 4-digit years: 1000-2099
+        standalone_re = re.compile(r"\b(1\d{3}|20\d{2})\b")
+
+        def repl_standalone(m: re.Match) -> str:
+            if not self._should_expand_numeric_token(text, m.start(1), m.end(1)):
+                return m.group(0)
+            y = int(m.group(1))
+            if 1000 <= y <= 2099:
+                return self._year_to_words(y)
+            return self._number_to_words(y)
+
+        return standalone_re.sub(repl_standalone, text)
+
+    def _verbalize_plain_integers(self, text: str) -> str:
+        """
+        Convert remaining standalone integers (1-4 digits) to words.
+        This improves general number pronunciation without exploding IDs.
+        """
+        int_re = re.compile(r"\b(\d{1,4})\b")
+
+        def repl(m: re.Match) -> str:
+            if not self._should_expand_numeric_token(text, m.start(1), m.end(1)):
+                return m.group(0)
+            token = m.group(1)
+            # Skip leading-zero numbers (often times/codes) like 05, 007
+            if len(token) > 1 and token.startswith("0"):
+                return token
+            n = int(m.group(1))
+            return self._number_to_words(n)
+
+        return int_re.sub(repl, text)
     
     def normalize_numbers(self, text: str) -> str:
-        """Convert numbers to spoken form"""
-        # Handle ordinals
-        text = re.sub(r'\b(\d+)(st|nd|rd|th)\b', r'\1', text)
-        
-        # Handle years (1900-2099)
-        text = re.sub(r'\b(19|20)(\d{2})\b', 
-                     lambda m: f"{m.group(1)} {m.group(2)}" if int(m.group(2)) < 10 
-                     else f"{m.group(1)}{m.group(2)[:1]} {m.group(2)[1:]}", text)
-        
+        """Convert numeric patterns into spoken-friendly words for TTS."""
+        if not text:
+            return text
+
+        # Protect patterns we do NOT want to touch (dates, semantic versions).
+        protected: Dict[str, str] = {}
+        protect_idx = 0
+
+        def _protect(pattern: str, label: str) -> None:
+            nonlocal text, protect_idx
+
+            rx = re.compile(pattern)
+
+            def _repl(m: re.Match) -> str:
+                nonlocal protect_idx
+                key = f"__{label}_{protect_idx}__"
+                protect_idx += 1
+                protected[key] = m.group(0)
+                return key
+
+            text = rx.sub(_repl, text)
+
+        # ISO dates like 2026-01-22
+        _protect(r"\b\d{4}-\d{2}-\d{2}\b", "PROTECTED_DATE")
+        # Semantic versions like 2.1.3 or v2.1.3
+        _protect(r"\b[vV]?\d+(?:\.\d+){2,}\b", "PROTECTED_VER")
+
+        # Normalize thousands separators early (1,234 -> 1234)
+        text = re.sub(r"\b(\d{1,3}),(\d{3})\b", r"\1\2", text)
+
+        # Handle ordinals (21st -> 21)
+        text = re.sub(r"\b(\d+)(st|nd|rd|th)\b", r"\1", text)
+
         # Handle phone numbers (basic format)
-        text = re.sub(r'\b(\d{3})-(\d{3})-(\d{4})\b', 
-                     r'\1 \2 \3', text)
-        
-        # Apply number patterns
+        text = re.sub(r"\b(\d{3})-(\d{3})-(\d{4})\b", r"\1 \2 \3", text)
+
+        # Apply configured number patterns (currency, percent, temperature, time)
+        # Expand currency to also accept decimals: $12.50 -> 12.50 dollars
+        text = re.sub(r"\$(\d+(?:\.\d+)?)", r"\1 dollars", text)
+
         for pattern, replacement in self.number_patterns:
-            if callable(replacement):
-                text = re.sub(pattern, replacement, text)
-            else:
-                text = re.sub(pattern, replacement, text)
-        
+            # Skip the old $ pattern since we handle it above with decimal support
+            if pattern == r"\$(\d+)":
+                continue
+            text = re.sub(pattern, replacement, text) if not callable(replacement) else re.sub(pattern, replacement, text)
+
+        # Ranges and decimals before integer conversion
+        text = self._verbalize_ranges(text)
+        text = self._verbalize_decimals(text)
+
+        # Year reading
+        text = self._verbalize_year_like_numbers(text)
+
+        # Remaining short integers (1-4 digits)
+        text = self._verbalize_plain_integers(text)
+
+        # Restore protected substrings
+        for key, val in protected.items():
+            text = text.replace(key, val)
+
         return text
     
     def expand_abbreviations(self, text: str) -> str:
@@ -283,6 +683,12 @@ class AdvancedTextSanitizer:
         # 3. Replace problematic Unicode characters
         for old_char, new_char in self.unicode_replacements.items():
             text = text.replace(old_char, new_char)
+
+        # 3.25 Light equation verbalization (e.g. E=mc^{2})
+        text = self._verbalize_simple_equations(text)
+
+        # 3.5 Expand contractions (you're -> you are, you've -> you have, I'd -> I would, etc.)
+        text = self._expand_contractions(text)
         
         # 4. Normalize numbers and special formats
         text = self.normalize_numbers(text)
