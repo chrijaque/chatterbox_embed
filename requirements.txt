@@ -30,7 +30,6 @@ noisereduce
 
 # Text normalization (recommended for better TTS pronunciation)
 inflect
-contractions
 
 # Development dependencies (optional)
 pytest

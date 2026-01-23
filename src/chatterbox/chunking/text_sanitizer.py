@@ -12,11 +12,6 @@ try:
 except Exception:  # pragma: no cover
     inflect = None
 
-try:
-    import contractions as _contractions  # type: ignore
-except Exception:  # pragma: no cover
-    _contractions = None
-
 logger = logging.getLogger(__name__)
 
 
@@ -258,59 +253,6 @@ class AdvancedTextSanitizer:
                 return f"{hour-12} {minute_spoken} PM"
         except:
             return time_str
-
-    def _expand_contractions(self, text: str) -> str:
-        """
-        Expand common English contractions (you're -> you are, I'd -> I would, you've -> you have, etc.)
-        Uses the optional `contractions` library when available.
-        """
-        try:
-            if _contractions is None:
-                # Fallback: conservative, common-contraction expansion.
-                # Intentionally avoids "'s" to reduce possessive damage (John's).
-                contractions_map = {
-                    r"\b([Yy])ou're\b": r"\1ou are",
-                    r"\b([Yy])ou've\b": r"\1ou have",
-                    r"\b([Yy])ou'll\b": r"\1ou will",
-                    r"\b([Yy])ou'd\b": r"\1ou would",
-                    r"\b([Ww])e're\b": r"\1e are",
-                    r"\b([Ww])e've\b": r"\1e have",
-                    r"\b([Ww])e'll\b": r"\1e will",
-                    r"\b([Ww])e'd\b": r"\1e would",
-                    r"\b([Tt])hey're\b": r"\1hey are",
-                    r"\b([Tt])hey've\b": r"\1hey have",
-                    r"\b([Tt])hey'll\b": r"\1hey will",
-                    r"\b([Tt])hey'd\b": r"\1hey would",
-                    r"\b([Ii])'m\b": r"\1 am",
-                    r"\b([Ii])'ve\b": r"\1 have",
-                    r"\b([Ii])'ll\b": r"\1 will",
-                    # "I'd" is ambiguous (had/would). Prefer "would" for narration.
-                    r"\b([Ii])'d\b": r"\1 would",
-                    r"\b([Cc])an't\b": r"\1annot",
-                    r"\b([Ww])on't\b": r"\1ill not",
-                    r"\b([Dd])on't\b": r"\1o not",
-                    r"\b([Dd])idn't\b": r"\1id not",
-                    r"\b([Dd])oesn't\b": r"\1oes not",
-                    r"\b([Ii])sn't\b": r"\1s not",
-                    r"\b([Aa])ren't\b": r"\1re not",
-                    r"\b([Ww])eren't\b": r"\1ere not",
-                    r"\b([Ww])asn't\b": r"\1as not",
-                    r"\b([Hh])aven't\b": r"\1ave not",
-                    r"\b([Hh])asn't\b": r"\1as not",
-                    r"\b([Hh])adn't\b": r"\1ad not",
-                    r"\b([Ww])ouldn't\b": r"\1ould not",
-                    r"\b([Ss])houldn't\b": r"\1hould not",
-                    r"\b([Cc])ouldn't\b": r"\1ould not",
-                    r"\b([Mm])ustn't\b": r"\1ust not",
-                    r"\b([Ll])et's\b": r"\1et us",
-                }
-                for pat, rep in contractions_map.items():
-                    text = re.sub(pat, rep, text)
-                return text
-            # `contractions.fix` is conservative and avoids touching most possessives.
-            return _contractions.fix(text)
-        except Exception:
-            return text
 
     def _number_to_words(self, n: int) -> str:
         """Convert integer to words with a stable 'and' style when available."""
@@ -686,9 +628,6 @@ class AdvancedTextSanitizer:
 
         # 3.25 Light equation verbalization (e.g. E=mc^{2})
         text = self._verbalize_simple_equations(text)
-
-        # 3.5 Expand contractions (you're -> you are, you've -> you have, I'd -> I would, etc.)
-        text = self._expand_contractions(text)
         
         # 4. Normalize numbers and special formats
         text = self.normalize_numbers(text)
