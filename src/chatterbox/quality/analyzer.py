@@ -178,9 +178,24 @@ class ChunkQualityAnalyzer:
             
             overall_score = max(0, base_score)
             
-            # Do not trigger regeneration based on quality metrics; allow any score.
-            # Retries should only occur if audio generation itself fails (exceptions in generate/save).
-            should_regenerate = False
+            # Decide whether we should regenerate this chunk.
+            #
+            # Rationale: In production we sometimes get "valid" waveforms that are mostly silence
+            # (or have long leading silence). The generation call doesn't throw, so without this
+            # gate the final stitched audio contains multi-second silent spans.
+            #
+            # We only request regeneration for issues that strongly indicate "no speech" or
+            # unusably quiet output.
+            regen_triggers = {
+                "excessive_silence",
+                "silence_at_start",
+                "silence_at_end",
+                "too_short",
+                "too_quiet",
+                "low_energy",
+                "fragmented_audio",
+            }
+            should_regenerate = any(issue in regen_triggers for issue in quality_issues)
             
             quality_score = QualityScore(
                 overall_score=overall_score,

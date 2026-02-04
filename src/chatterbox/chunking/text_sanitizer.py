@@ -608,6 +608,89 @@ class AdvancedTextSanitizer:
         text = re.sub(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', '', text)
         
         return text
+
+    def _expand_contractions_and_possessives(self, text: str) -> str:
+        """
+        Expand common contractions (you're -> you are) and normalize possessives (Carl's -> Carls).
+        This avoids the model spelling out apostrophes as separate tokens ("you re", "Carl s").
+        """
+        if not text:
+            return text
+
+        # Common contractions. Keep this conservative and high-value.
+        # We expand to plain words that are consistently pronounced.
+        contractions = {
+            "you're": "you are",
+            "you've": "you have",
+            "you'll": "you will",
+            "you'd": "you would",
+            "i'm": "I am",
+            "i've": "I have",
+            "i'll": "I will",
+            "i'd": "I would",
+            "we're": "we are",
+            "we've": "we have",
+            "we'll": "we will",
+            "we'd": "we would",
+            "they're": "they are",
+            "they've": "they have",
+            "they'll": "they will",
+            "they'd": "they would",
+            "it's": "it is",
+            "that's": "that is",
+            "there's": "there is",
+            "here's": "here is",
+            "what's": "what is",
+            "who's": "who is",
+            "can't": "cannot",
+            "won't": "will not",
+            "don't": "do not",
+            "doesn't": "does not",
+            "didn't": "did not",
+            "isn't": "is not",
+            "aren't": "are not",
+            "wasn't": "was not",
+            "weren't": "were not",
+            "haven't": "have not",
+            "hasn't": "has not",
+            "hadn't": "had not",
+            "shouldn't": "should not",
+            "wouldn't": "would not",
+            "couldn't": "could not",
+            "let's": "let us",
+            "she's": "she is",
+            "he's": "he is",
+            "she'll": "she will",
+            "he'll": "he will",
+            "she'd": "she would",
+            "he'd": "he would",
+        }
+
+        # Replace contractions case-insensitively while preserving sentence-case.
+        # We avoid a single giant regex for readability.
+        def _cap_like(src: str, repl: str) -> str:
+            if not src:
+                return repl
+            # If source starts uppercase, capitalize replacement first char.
+            if src[0].isupper():
+                return repl[0].upper() + repl[1:]
+            return repl
+
+        for c, repl in contractions.items():
+            # Word boundary, case-insensitive match
+            rx = re.compile(rf"\b{re.escape(c)}\b", re.IGNORECASE)
+            text = rx.sub(lambda m: _cap_like(m.group(0), repl), text)
+
+        # Possessives: Carl's -> Carls, boys' -> boys
+        # After contraction expansion, remaining "'s" are likely possessives.
+        text = re.sub(r"\b([A-Za-z]+)'s\b", r"\1s", text)
+        text = re.sub(r"\b([A-Za-z]+)s'\b", r"\1s", text)
+
+        # Any remaining apostrophes inside words: rock'n'roll -> rocknroll
+        # This is intentionally aggressive to prevent "X s" spelling artifacts.
+        text = re.sub(r"(?<=\w)'(?=\w)", "", text)
+
+        return text
     
     def deep_clean(self, text: str) -> str:
         """Comprehensive text cleaning pipeline"""
@@ -625,6 +708,9 @@ class AdvancedTextSanitizer:
         # 3. Replace problematic Unicode characters
         for old_char, new_char in self.unicode_replacements.items():
             text = text.replace(old_char, new_char)
+
+        # 3.1 Expand contractions / normalize apostrophes before number & spacing normalization
+        text = self._expand_contractions_and_possessives(text)
 
         # 3.25 Light equation verbalization (e.g. E=mc^{2})
         text = self._verbalize_simple_equations(text)

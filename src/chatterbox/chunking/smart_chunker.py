@@ -117,7 +117,28 @@ class SmartChunker:
                 if total_score > best_score:
                     best_score = total_score
                     best_pos = i + 1  # Include the punctuation in the chunk
-        
+
+        # If we couldn't find punctuation to break on, avoid cutting mid-word.
+        # Snap to the nearest whitespace before search_end (preferred), otherwise after.
+        if best_score <= 0.0:
+            # Look backwards for a whitespace boundary
+            back = search_end
+            while back > search_start:
+                if text[back - 1].isspace():
+                    best_pos = back
+                    break
+                back -= 1
+
+            # If none found, look forward a bit for whitespace (within a small window)
+            if best_pos == search_end:
+                fwd_limit = min(len(text), search_end + 40)
+                fwd = search_end
+                while fwd < fwd_limit:
+                    if text[fwd].isspace():
+                        best_pos = fwd + 1
+                        break
+                    fwd += 1
+
         return best_pos, best_score
     
     def smart_chunk(self, text: str, target_chars: int = 400, max_chars: int = 600) -> List[ChunkInfo]:

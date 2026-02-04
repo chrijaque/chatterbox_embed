@@ -85,6 +85,24 @@ class AdvancedStitcher:
         """Apply intelligent fade in/out based on content context"""
         
         processed_segment = segment
+
+        # If a chunk starts "hot" (speech begins immediately), long fade-ins can
+        # attenuate initial consonants (e.g. "Strings" -> "trings"). We detect this
+        # cheaply via the first ~60ms loudness.
+        def _starts_hot(seg) -> bool:
+            try:
+                head = seg[:60]
+                # -inf means pure silence; any louder than -35 dBFS we consider "hot"
+                return head.dBFS != float("-inf") and head.dBFS > -35.0
+            except Exception:
+                return False
+
+        def _ends_hot(seg) -> bool:
+            try:
+                tail = seg[-60:]
+                return tail.dBFS != float("-inf") and tail.dBFS > -35.0
+            except Exception:
+                return False
         
         # Apply fade in
         if is_first:
@@ -93,6 +111,9 @@ class AdvancedStitcher:
                 processed_segment = processed_segment.fade_in(fade_in_duration)
         else:
             fade_in_duration = self.fade_in_duration
+            if _starts_hot(processed_segment):
+                # Preserve initial phonemes
+                fade_in_duration = min(fade_in_duration, 20)
             
             # Longer fade for content type transitions
             if prev_chunk_info and prev_chunk_info.content_type == ContentType.DIALOGUE:
@@ -103,6 +124,8 @@ class AdvancedStitcher:
         # Apply fade out (except for last chunk)
         if not is_last:
             fade_out_duration = self.fade_out_duration
+            if _ends_hot(processed_segment):
+                fade_out_duration = min(fade_out_duration, 25)
             
             # Longer fade for dialogue endings
             if next_chunk_info and next_chunk_info.content_type == ContentType.DIALOGUE:
