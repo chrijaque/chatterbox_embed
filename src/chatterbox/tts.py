@@ -981,6 +981,15 @@ class ChatterboxTTS:
             f"(adaptive_voice_param_blend={adaptive_voice_param_blend:.2f})"
         )
         wav_paths = []
+        quality_scores: List[QualityScore] = []
+
+        # QA/retry configuration (protect against "silent chunk" failures)
+        try:
+            max_chunk_regen_attempts = int(os.getenv("CHATTERBOX_CHUNK_REGEN_ATTEMPTS", "3"))
+        except Exception:
+            max_chunk_regen_attempts = 3
+        max_chunk_regen_attempts = max(1, min(6, max_chunk_regen_attempts))
+        fail_on_bad_chunk = os.getenv("CHATTERBOX_FAIL_ON_BAD_CHUNK", "true").lower() == "true"
 
         for i, chunk_info in enumerate(chunk_infos):
             logger.info(f"🎵 Generating chunk {i+1}/{len(chunk_infos)}: {chunk_info.text[:50]}...")
@@ -1018,24 +1027,81 @@ class ChatterboxTTS:
                 )
 
             # Use adaptive parameters for varied narration
-            audio_tensor = self._generate_with_prepared_conditionals(
-                text=chunk_info.text,
-                conditionals=self.conds,
-                exaggeration=exag_used,
-                temperature=temp_used,
-                cfg_weight=cfg_used,
-                repetition_penalty=adaptive_params.get("repetition_penalty", 1.2),
-                min_p=adaptive_params.get("min_p", 0.05),
-                top_p=adaptive_params.get("top_p", 1.0),
-            )
-
-            # Save chunk to temporary file
+            # Generate + (optional) QA gate with retries to prevent silent chunks.
             temp_wav = tempfile.NamedTemporaryFile(suffix=f"_chunk_{chunk_info.id}.wav", delete=False)
             temp_wav_path = temp_wav.name
             temp_wav.close()
-            torchaudio.save(temp_wav_path, audio_tensor, self.sr)
+
+            # Base params for this chunk (we may adjust during retries)
+            rep_pen = float(adaptive_params.get("repetition_penalty", 1.2))
+            min_p = float(adaptive_params.get("min_p", 0.05))
+            top_p = float(adaptive_params.get("top_p", 1.0))
+
+            last_qs: Optional[QualityScore] = None
+            for attempt in range(1, max_chunk_regen_attempts + 1):
+                # Stabilize on retries: reduce randomness, increase adherence.
+                # This specifically targets cases where the model emits mostly silence or low-energy output.
+                if attempt == 1:
+                    temp_try = temp_used
+                    exag_try = exag_used
+                    cfg_try = cfg_used
+                else:
+                    temp_try = max(0.5, temp_used - (0.08 * (attempt - 1)))
+                    cfg_try = min(0.8, cfg_used + (0.08 * (attempt - 1)))
+                    exag_try = max(0.1, exag_used - (0.05 * (attempt - 1)))
+
+                audio_tensor = self._generate_with_prepared_conditionals(
+                    text=chunk_info.text,
+                    conditionals=self.conds,
+                    exaggeration=exag_try,
+                    temperature=temp_try,
+                    cfg_weight=cfg_try,
+                    repetition_penalty=rep_pen,
+                    min_p=min_p,
+                    top_p=top_p,
+                )
+                torchaudio.save(temp_wav_path, audio_tensor, self.sr)
+
+                if not getattr(self, "enable_quality_analysis", False):
+                    last_qs = QualityScore(
+                        overall_score=100.0,
+                        issues=[],
+                        duration=float(audio_tensor.shape[-1]) / float(self.sr),
+                        silence_ratio=0.0,
+                        peak_db=0.0,
+                        rms_db=0.0,
+                        should_regenerate=False,
+                    )
+                    break
+
+                qs = self.quality_analyzer.analyze_chunk_quality(temp_wav_path, chunk_info)
+                last_qs = qs
+
+                if not qs.should_regenerate:
+                    break
+
+                logger.warning(
+                    f"⚠️ Chunk {chunk_info.id} failed QA (attempt {attempt}/{max_chunk_regen_attempts}) "
+                    f"issues={qs.issues} silence_ratio={qs.silence_ratio:.2f} dur={qs.duration:.2f}s "
+                    f"-> retrying with temp={temp_try:.2f} cfg={cfg_try:.2f} exag={exag_try:.2f}"
+                )
+
+                if attempt == max_chunk_regen_attempts and fail_on_bad_chunk:
+                    raise RuntimeError(
+                        f"Chunk {chunk_info.id} failed QA after {max_chunk_regen_attempts} attempts: {qs.issues}"
+                    )
 
             wav_paths.append(temp_wav_path)
+            if last_qs is not None:
+                quality_scores.append(last_qs)
+
+        # Optional summary logging
+        try:
+            if getattr(self, "enable_quality_analysis", False) and quality_scores:
+                total_generation_time = time.time() - generation_start
+                self._log_quality_analysis(chunk_infos, quality_scores, total_generation_time)
+        except Exception:
+            pass
 
         return wav_paths
     

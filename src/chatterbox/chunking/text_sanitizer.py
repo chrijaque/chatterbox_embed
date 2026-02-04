@@ -681,6 +681,38 @@ class AdvancedTextSanitizer:
             rx = re.compile(rf"\b{re.escape(c)}\b", re.IGNORECASE)
             text = rx.sub(lambda m: _cap_like(m.group(0), repl), text)
 
+        # Re-write common possessive noun phrases into "of" form to avoid the model
+        # spelling out the apostrophe as a separate token:
+        #
+        #   "the party's vibe" -> "the vibe of the party"
+        #   "Carl's balls"     -> "balls of Carl"
+        #
+        # This is a deliberate semantic-preserving transform for TTS stability.
+        det_words = r"(the|a|an|this|that|these|those|my|your|our|his|her|their)"
+
+        # Singular possessive: X's Y -> Y of X
+        rx_poss_phrase = re.compile(
+            rf"\b(?:(?P<det>{det_words})\s+)?(?P<owner>[A-Za-z][A-Za-z]+)'s\s+(?P<thing>[A-Za-z][A-Za-z]+)\b",
+            re.IGNORECASE,
+        )
+
+        def _repl_poss_phrase(m: re.Match) -> str:
+            det = m.group("det") or ""
+            owner = m.group("owner") or ""
+            thing = m.group("thing") or ""
+            owner_phrase = f"{det} {owner}".strip() if det else owner
+            # Preserve capitalization of "thing" when it starts a sentence
+            return f"{thing} of {owner_phrase}".strip()
+
+        text = rx_poss_phrase.sub(_repl_poss_phrase, text)
+
+        # Plural possessive: Xs' Y -> Y of Xs
+        rx_plural_poss_phrase = re.compile(
+            rf"\b(?:(?P<det>{det_words})\s+)?(?P<owner>[A-Za-z][A-Za-z]+)s'\s+(?P<thing>[A-Za-z][A-Za-z]+)\b",
+            re.IGNORECASE,
+        )
+        text = rx_plural_poss_phrase.sub(_repl_poss_phrase, text)
+
         # Possessives: Carl's -> Carls, boys' -> boys
         # After contraction expansion, remaining "'s" are likely possessives.
         text = re.sub(r"\b([A-Za-z]+)'s\b", r"\1s", text)
