@@ -75,8 +75,8 @@ class ChatterboxTTS:
         self.max_parallel_workers = 1  # Disabled for single-user processing
         self.enable_parallel_processing = False  # Disabled as requested
         # Quality Analysis toggle (disable to remove overhead)
-        # Default to enabled (silence-chunk retries); can be disabled via env.
-        self.enable_quality_analysis = os.getenv("CHATTERBOX_ENABLE_QUALITY_ANALYSIS", "true").lower() == "true"
+        # Default to disabled; can be enabled via env CHATTERBOX_ENABLE_QUALITY_ANALYSIS=true
+        self.enable_quality_analysis = os.getenv("CHATTERBOX_ENABLE_QUALITY_ANALYSIS", "false").lower() == "true"
         
         # Phase 1: Conditional Caching
         self._cached_conditionals = None

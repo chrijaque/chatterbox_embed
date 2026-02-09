@@ -30,6 +30,7 @@ noisereduce
 
 # Text normalization (recommended for better TTS pronunciation)
 inflect
+nltk>=3.8
 
 # Development dependencies (optional)
 pytest
