@@ -611,110 +611,14 @@ class AdvancedTextSanitizer:
 
     def _expand_contractions_and_possessives(self, text: str) -> str:
         """
-        Expand common contractions (you're -> you are) and normalize possessives (Carl's -> Carls).
-        This avoids the model spelling out apostrophes as separate tokens ("you re", "Carl s").
+        Normalize possessives (Carl's -> Carls) and remove apostrophes.
+        This avoids the model spelling out apostrophes as separate tokens ("Carl s").
         """
         if not text:
             return text
 
-        # Common contractions. Keep this conservative and high-value.
-        # We expand to plain words that are consistently pronounced.
-        contractions = {
-            "you're": "you are",
-            "you've": "you have",
-            "you'll": "you will",
-            "you'd": "you would",
-            "i'm": "I am",
-            "i've": "I have",
-            "i'll": "I will",
-            "i'd": "I would",
-            "we're": "we are",
-            "we've": "we have",
-            "we'll": "we will",
-            "we'd": "we would",
-            "they're": "they are",
-            "they've": "they have",
-            "they'll": "they will",
-            "they'd": "they would",
-            "it's": "it is",
-            "that's": "that is",
-            "there's": "there is",
-            "here's": "here is",
-            "what's": "what is",
-            "who's": "who is",
-            "can't": "cannot",
-            "won't": "will not",
-            "don't": "do not",
-            "doesn't": "does not",
-            "didn't": "did not",
-            "isn't": "is not",
-            "aren't": "are not",
-            "wasn't": "was not",
-            "weren't": "were not",
-            "haven't": "have not",
-            "hasn't": "has not",
-            "hadn't": "had not",
-            "shouldn't": "should not",
-            "wouldn't": "would not",
-            "couldn't": "could not",
-            "let's": "let us",
-            "she's": "she is",
-            "he's": "he is",
-            "she'll": "she will",
-            "he'll": "he will",
-            "she'd": "she would",
-            "he'd": "he would",
-        }
-
-        # Replace contractions case-insensitively while preserving sentence-case.
-        # We avoid a single giant regex for readability.
-        def _cap_like(src: str, repl: str) -> str:
-            if not src:
-                return repl
-            # If source starts uppercase, capitalize replacement first char.
-            if src[0].isupper():
-                return repl[0].upper() + repl[1:]
-            return repl
-
-        for c, repl in contractions.items():
-            # Word boundary, case-insensitive match
-            rx = re.compile(rf"\b{re.escape(c)}\b", re.IGNORECASE)
-            text = rx.sub(lambda m: _cap_like(m.group(0), repl), text)
-
-        # Re-write common possessive noun phrases into "of" form to avoid the model
-        # spelling out the apostrophe as a separate token:
-        #
-        #   "the party's vibe" -> "the vibe of the party"
-        #   "Carl's balls"     -> "balls of Carl"
-        #
-        # This is a deliberate semantic-preserving transform for TTS stability.
-        det_words = r"(the|a|an|this|that|these|those|my|your|our|his|her|their)"
-
-        # Singular possessive: X's Y -> Y of X
-        rx_poss_phrase = re.compile(
-            rf"\b(?:(?P<det>{det_words})\s+)?(?P<owner>[A-Za-z][A-Za-z]+)'s\s+(?P<thing>[A-Za-z][A-Za-z]+)\b",
-            re.IGNORECASE,
-        )
-
-        def _repl_poss_phrase(m: re.Match) -> str:
-            det = m.group("det") or ""
-            owner = m.group("owner") or ""
-            thing = m.group("thing") or ""
-            owner_phrase = f"{det} {owner}".strip() if det else owner
-            # Preserve capitalization of "thing" when it starts a sentence
-            return f"{thing} of {owner_phrase}".strip()
-
-        text = rx_poss_phrase.sub(_repl_poss_phrase, text)
-
-        # Plural possessive: Xs' Y -> Y of Xs
-        rx_plural_poss_phrase = re.compile(
-            rf"\b(?:(?P<det>{det_words})\s+)?(?P<owner>[A-Za-z][A-Za-z]+)s'\s+(?P<thing>[A-Za-z][A-Za-z]+)\b",
-            re.IGNORECASE,
-        )
-        text = rx_plural_poss_phrase.sub(_repl_poss_phrase, text)
-
         # Possessives: Carl's -> Carls, boys' -> boys
-        # After contraction expansion, remaining "'s" are likely possessives.
+        # Remove apostrophe to prevent the model from pronouncing it as a separate token.
         text = re.sub(r"\b([A-Za-z]+)'s\b", r"\1s", text)
         text = re.sub(r"\b([A-Za-z]+)s'\b", r"\1s", text)
 
