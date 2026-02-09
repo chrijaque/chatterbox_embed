@@ -628,6 +628,61 @@ class AdvancedTextSanitizer:
 
         return text
     
+    def _verbalize_urls(self, text: str) -> str:
+        """
+        Convert URLs/domains to a format that will be pronounced correctly.
+        Examples:
+        - "minstraly.com" -> "minstraly dot com"
+        - "minstraly.us" -> "minstraly dot U S"
+        - "example.co.uk" -> "example dot C O dot U K"
+        """
+        if not text:
+            return text
+        
+        # Common TLDs that should be spelled out letter by letter (2-3 letter country codes, etc.)
+        # For longer TLDs like .com, .org, .net, we keep them as words
+        short_tlds = {
+            'us', 'uk', 'io', 'ai', 'tv', 'co', 'cc', 'me', 'ly', 'to', 'be', 'de', 'fr', 
+            'it', 'es', 'nl', 'se', 'no', 'dk', 'fi', 'pl', 'cz', 'at', 'ch', 'ie', 'au',
+            'nz', 'jp', 'kr', 'cn', 'in', 'ru', 'br', 'mx', 'ar', 'cl', 'za', 'ae', 'sa'
+        }
+        
+        # Pattern to match domain names: word characters, dots, and TLD
+        # Matches patterns like: example.com, minstraly.us, subdomain.example.co.uk
+        def replace_url(match):
+            domain = match.group(0)
+            
+            # Split by dots
+            parts = domain.split('.')
+            
+            # Process each part
+            result_parts = []
+            for i, part in enumerate(parts):
+                if i > 0:  # Add "dot" before each part after the first
+                    result_parts.append('dot')
+                
+                # Check if this part is a short TLD (regardless of position)
+                # This handles cases like "example.co.uk" where both .co and .uk should be spelled out
+                if part.lower() in short_tlds:
+                    # Spell out short TLDs letter by letter: "co" -> "C O", "us" -> "U S"
+                    spelled = ' '.join(part.upper())
+                    result_parts.append(spelled)
+                else:
+                    # Keep domain parts as-is
+                    result_parts.append(part)
+            
+            return ' '.join(result_parts)
+        
+        # Match domain patterns: word characters, dots, ending with a TLD
+        # This matches: example.com, minstraly.us, subdomain.example.co.uk
+        # Uses word boundaries to avoid matching within words
+        # Pattern matches domains with at least one letter (to avoid matching pure numbers like "3.14")
+        # Domain parts can be 1-63 characters
+        pattern = r'\b(?=[a-zA-Z0-9]*[a-zA-Z])(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}\b'
+        text = re.sub(pattern, replace_url, text)
+        
+        return text
+    
     def deep_clean(self, text: str) -> str:
         """Comprehensive text cleaning pipeline"""
         if not text or not text.strip():
@@ -647,6 +702,9 @@ class AdvancedTextSanitizer:
 
         # 3.1 Expand contractions / normalize apostrophes before number & spacing normalization
         text = self._expand_contractions_and_possessives(text)
+
+        # 3.15 Verbalize URLs/domains (e.g. minstraly.com -> minstraly dot com)
+        text = self._verbalize_urls(text)
 
         # 3.25 Light equation verbalization (e.g. E=mc^{2})
         text = self._verbalize_simple_equations(text)
