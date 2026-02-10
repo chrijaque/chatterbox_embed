@@ -2,7 +2,7 @@
 import logging
 import re
 import unicodedata
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple, List
 
 # Optional dependencies for better text normalization.
 # We keep these optional so the package can still run without them,
@@ -17,6 +17,56 @@ logger = logging.getLogger(__name__)
 
 class AdvancedTextSanitizer:
     """Comprehensive text cleaning and normalization for optimal TTS quality"""
+    
+    # Language-specific allowed character sets
+    # Characters outside these sets will be flagged as disallowed
+    LANGUAGE_ALLOWED_CHARS = {
+        'en': {
+            # English: ASCII + common accented characters that might appear in English text
+            'allowed': set(range(32, 127)) | {ord(c) for c in 'áéíóúàèìòùâêîôûäëïöüñçÁÉÍÓÚÀÈÌÒÙÂÊÎÔÛÄËÏÖÜÑÇ'},
+            'description': 'English (ASCII + common accented characters)'
+        },
+        'es': {
+            # Spanish: ASCII + Spanish-specific characters
+            'allowed': set(range(32, 127)) | {ord(c) for c in 'áéíóúñüÁÉÍÓÚÑÜ¿¡'},
+            'description': 'Spanish (ASCII + Spanish-specific characters)'
+        },
+        'fr': {
+            # French: ASCII + French-specific characters
+            'allowed': set(range(32, 127)) | {ord(c) for c in 'àâäéèêëïîôùûüÿçÀÂÄÉÈÊËÏÎÔÙÛÜŸÇ'},
+            'description': 'French (ASCII + French-specific characters)'
+        },
+        'de': {
+            # German: ASCII + German-specific characters
+            'allowed': set(range(32, 127)) | {ord(c) for c in 'äöüßÄÖÜ'},
+            'description': 'German (ASCII + German-specific characters)'
+        },
+        'it': {
+            # Italian: ASCII + Italian-specific characters
+            'allowed': set(range(32, 127)) | {ord(c) for c in 'àèéìíîòóùúÀÈÉÌÍÎÒÓÙÚ'},
+            'description': 'Italian (ASCII + Italian-specific characters)'
+        },
+        'pt': {
+            # Portuguese: ASCII + Portuguese-specific characters
+            'allowed': set(range(32, 127)) | {ord(c) for c in 'áàâãéêíóôõúüçÁÀÂÃÉÊÍÓÔÕÚÜÇ'},
+            'description': 'Portuguese (ASCII + Portuguese-specific characters)'
+        },
+        'da': {
+            # Danish: ASCII + Danish-specific characters (æ, ø, å)
+            'allowed': set(range(32, 127)) | {ord(c) for c in 'æøåÆØÅ'},
+            'description': 'Danish (ASCII + Danish-specific characters: æ, ø, å)'
+        },
+        'no': {
+            # Norwegian: ASCII + Norwegian-specific characters (æ, ø, å)
+            'allowed': set(range(32, 127)) | {ord(c) for c in 'æøåÆØÅ'},
+            'description': 'Norwegian (ASCII + Norwegian-specific characters: æ, ø, å)'
+        },
+        'sv': {
+            # Swedish: ASCII + Swedish-specific characters (ä, ö, å)
+            'allowed': set(range(32, 127)) | {ord(c) for c in 'äöåÄÖÅ'},
+            'description': 'Swedish (ASCII + Swedish-specific characters: ä, ö, å)'
+        },
+    }
     
     def __init__(self):
         # Problematic character mappings
@@ -682,6 +732,55 @@ class AdvancedTextSanitizer:
         text = re.sub(pattern, replace_url, text)
         
         return text
+    
+    def validate_text_for_language(self, text: str, language: str = 'en') -> Tuple[bool, Optional[str], Optional[List[str]]]:
+        """
+        Validate text for language-specific character support.
+        
+        :param text: Text to validate
+        :param language: Language code (e.g., 'en', 'da', 'no', 'sv')
+        :return: Tuple of (is_valid, error_message, disallowed_chars)
+                 - is_valid: True if text contains only allowed characters
+                 - error_message: Human-readable error message if invalid, None if valid
+                 - disallowed_chars: List of disallowed characters found, None if valid
+        """
+        if not text:
+            return True, None, None
+        
+        # Normalize language code
+        language = language.lower().strip() if language else 'en'
+        
+        # Get allowed character set for language, default to English
+        lang_config = self.LANGUAGE_ALLOWED_CHARS.get(language, self.LANGUAGE_ALLOWED_CHARS['en'])
+        allowed_chars = lang_config['allowed']
+        lang_description = lang_config['description']
+        
+        # Find disallowed characters
+        disallowed_chars = []
+        for char in text:
+            char_ord = ord(char)
+            # Skip whitespace and control characters (we handle these separately)
+            if char_ord < 32:
+                continue
+            if char_ord not in allowed_chars:
+                if char not in disallowed_chars:
+                    disallowed_chars.append(char)
+        
+        if disallowed_chars:
+            # Create user-friendly error message
+            unique_chars = sorted(set(disallowed_chars))
+            char_list = ', '.join(f"'{c}'" for c in unique_chars[:10])  # Show first 10
+            if len(unique_chars) > 10:
+                char_list += f" and {len(unique_chars) - 10} more"
+            
+            error_msg = (
+                f"Text contains characters not supported for {lang_description}. "
+                f"Disallowed characters found: {char_list}. "
+                f"Please remove these characters or use a different language setting."
+            )
+            return False, error_msg, unique_chars
+        
+        return True, None, None
     
     def deep_clean(self, text: str) -> str:
         """Comprehensive text cleaning pipeline"""
