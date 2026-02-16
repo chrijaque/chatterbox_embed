@@ -22,8 +22,9 @@ class AdvancedTextSanitizer:
     # Characters outside these sets will be flagged as disallowed
     LANGUAGE_ALLOWED_CHARS = {
         'en': {
-            # English: ASCII + common accented characters that might appear in English text
-            'allowed': set(range(32, 127)) | {ord(c) for c in 'áéíóúàèìòùâêîôûäëïöüñçÁÉÍÓÚÀÈÌÒÙÂÊÎÔÛÄËÏÖÜÑÇ'},
+            # English: ASCII + common accented characters from Romance/Germanic/Nordic
+            # (borrowed words, names, place names: café, naïve, Müller, Copenhagen, Åland)
+            'allowed': set(range(32, 127)) | {ord(c) for c in 'áéíóúàèìòùâêîôûäëïöüñçæøåßÁÉÍÓÚÀÈÌÒÙÂÊÎÔÛÄËÏÖÜÑÇÆØÅ'},
             'description': 'English (ASCII + common accented characters)'
         },
         'es': {
@@ -733,9 +734,24 @@ class AdvancedTextSanitizer:
         
         return text
     
+    def _normalize_typographic_punctuation(self, text: str) -> str:
+        """
+        Replace typographic/smart punctuation with ASCII equivalents.
+        Use this before validation so we replace rather than throw for
+        common formatting issues like curly quotes/apostrophes.
+        """
+        if not text:
+            return text
+        for old_char, new_char in self.unicode_replacements.items():
+            text = text.replace(old_char, new_char)
+        return text
+
     def validate_text_for_language(self, text: str, language: str = 'en') -> Tuple[bool, Optional[str], Optional[List[str]]]:
         """
         Validate text for language-specific character support.
+        
+        Before validation, typographic punctuation (e.g. ' → ', " → ") is
+        normalized to ASCII equivalents so we replace rather than throw.
         
         :param text: Text to validate
         :param language: Language code (e.g., 'en', 'da', 'no', 'sv')
@@ -746,6 +762,10 @@ class AdvancedTextSanitizer:
         """
         if not text:
             return True, None, None
+        
+        # Normalize typographic punctuation first (replace ' with ', etc.)
+        # so we don't throw for wrongly formatted characters we can fix
+        text = self._normalize_typographic_punctuation(text)
         
         # Normalize language code
         language = language.lower().strip() if language else 'en'
