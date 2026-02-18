@@ -78,6 +78,11 @@ class ChatterboxTTS:
         # Default to disabled; can be enabled via env CHATTERBOX_ENABLE_QUALITY_ANALYSIS=true
         self.enable_quality_analysis = os.getenv("CHATTERBOX_ENABLE_QUALITY_ANALYSIS", "false").lower() == "true"
         self.experiment_config = self._init_experiment_config()
+        if self.experiment_config.get("enabled", False):
+            logger.warning(
+                "🧪 Experiment instrumentation active | version=2026-02-18b name=%s",
+                self.experiment_config.get("name", "default"),
+            )
         
         # Phase 1: Conditional Caching
         self._cached_conditionals = None
@@ -134,6 +139,13 @@ class ChatterboxTTS:
             return default
         return str(raw).strip().lower() in ("1", "true", "yes", "on")
 
+    def _log_experiment(self, message: str, *args) -> None:
+        """Promote experiment diagnostics to warning level for visibility in worker logs."""
+        if (self.experiment_config or {}).get("enabled", False):
+            logger.warning(message, *args)
+        else:
+            logger.info(message, *args)
+
     def _init_experiment_config(self) -> Dict[str, Any]:
         """Build experiment toggles so we can isolate one theory per run."""
         cfg: Dict[str, Any] = {
@@ -146,6 +158,7 @@ class ChatterboxTTS:
             "enable_retry_param_drift": self._env_bool("CHATTERBOX_EXPERIMENT_ENABLE_RETRY_PARAM_DRIFT", True),
             "enable_adaptive_voice_params": self._env_bool("CHATTERBOX_EXPERIMENT_ENABLE_ADAPTIVE_VOICE_PARAMS", True),
             "verbose_chunk_logs": self._env_bool("CHATTERBOX_EXPERIMENT_VERBOSE_CHUNK_LOGS", True),
+            "show_sampling_progress": self._env_bool("CHATTERBOX_EXPERIMENT_SHOW_SAMPLING_PROGRESS", False),
             "force_adaptive_blend": None,
         }
 
@@ -176,7 +189,7 @@ class ChatterboxTTS:
             cfg["enable_adaptive_voice_params"] = False
             cfg["enable_qa_regen"] = False
 
-        logger.info(
+        self._log_experiment(
             "🧪 Experiment config | enabled=%s name=%s issue_only=%s token_guards=%s silence_gate=%s qa_regen=%s retry_param_drift=%s adaptive_voice_params=%s force_blend=%s",
             cfg["enabled"],
             cfg["name"],
@@ -642,7 +655,10 @@ class ChatterboxTTS:
             
             speech_tokens = speech_tokens[speech_tokens < 6561]
             token_count = int(speech_tokens.numel()) if speech_tokens is not None else 0
-            logger.info(f"🧪 T3 token diagnostics | mode=single_generate token_count={token_count}")
+            self._log_experiment(
+                "🧪 T3 token diagnostics | mode=single_generate token_count=%s",
+                token_count,
+            )
             if self.experiment_config.get("enable_token_guards", True):
                 if speech_tokens is None or speech_tokens.numel() == 0:
                     raise RuntimeError("T3 produced empty speech token sequence (likely early EOS)")
@@ -708,7 +724,11 @@ class ChatterboxTTS:
                 t3_cond=chunk_conditionals.t3,
                 text_tokens=text_tokens,
                 max_new_tokens=max_new_tokens_override or 1000,  # dynamic cap for long chunks
-                show_progress=True,
+                show_progress=(
+                    bool(self.experiment_config.get("show_sampling_progress", False))
+                    if (self.experiment_config or {}).get("enabled", False)
+                    else True
+                ),
                 temperature=temperature,
                 cfg_weight=cfg_weight,
                 repetition_penalty=repetition_penalty,
@@ -724,11 +744,13 @@ class ChatterboxTTS:
             speech_tokens = speech_tokens[speech_tokens < 6561]
             token_count = int(speech_tokens.numel()) if speech_tokens is not None else 0
             if diagnostics_chunk_id is not None:
-                logger.info(
-                    f"🧪 Chunk {diagnostics_chunk_id} token diagnostics | token_count={token_count}"
+                self._log_experiment(
+                    "🧪 Chunk %s token diagnostics | token_count=%s",
+                    diagnostics_chunk_id,
+                    token_count,
                 )
             else:
-                logger.info(f"🧪 T3 token diagnostics | token_count={token_count}")
+                self._log_experiment("🧪 T3 token diagnostics | token_count=%s", token_count)
             if self.experiment_config.get("enable_token_guards", True):
                 if speech_tokens is None or speech_tokens.numel() == 0:
                     raise RuntimeError("T3 produced empty speech token sequence (likely early EOS)")
@@ -1083,7 +1105,7 @@ class ChatterboxTTS:
         fail_on_bad_chunk = os.getenv("CHATTERBOX_FAIL_ON_BAD_CHUNK", "true").lower() == "true"
         silence_peak_threshold = 1e-6
         silence_rms_threshold = 1e-7
-        logger.info(
+        self._log_experiment(
             "🧪 Chunk regen config | quality_analysis=%s fail_on_bad_chunk=%s max_attempts=%d silence_gate=(peak<%.1e,rms<%.1e)",
             getattr(self, "enable_quality_analysis", False),
             fail_on_bad_chunk,
@@ -1091,7 +1113,7 @@ class ChatterboxTTS:
             silence_peak_threshold,
             silence_rms_threshold,
         )
-        logger.info(
+        self._log_experiment(
             "🧪 Experiment run | enabled=%s name=%s issue_only=%s token_guards=%s silence_gate=%s qa_regen=%s retry_param_drift=%s adaptive_voice_params=%s blend=%.2f",
             exp_cfg.get("enabled", False),
             exp_cfg.get("name", "default"),
@@ -1192,9 +1214,14 @@ class ChatterboxTTS:
                     x = audio_tensor.detach().cpu().numpy().ravel()
                     peak = float(np.max(np.abs(x))) if x.size else 0.0
                     rms = float(np.sqrt(np.mean(x.astype(np.float64) ** 2))) if x.size else 0.0
-                    logger.info(
-                        f"🧪 Chunk {chunk_info.id} diagnostics | attempt={attempt}/{max_chunk_regen_attempts} "
-                        f"token_count={token_count} peak={peak:.3e} rms={rms:.3e}"
+                    self._log_experiment(
+                        "🧪 Chunk %s diagnostics | attempt=%s/%s token_count=%s peak=%.3e rms=%.3e",
+                        chunk_info.id,
+                        attempt,
+                        max_chunk_regen_attempts,
+                        token_count,
+                        peak,
+                        rms,
                     )
 
                     if exp_cfg.get("enable_silence_gate", True) and (

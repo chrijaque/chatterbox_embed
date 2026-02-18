@@ -31,6 +31,7 @@ noisereduce
 # Text normalization (recommended for better TTS pronunciation)
 inflect
 nltk>=3.8
+google-cloud-firestore>=2.13.0
 
 # Development dependencies (optional)
 pytest

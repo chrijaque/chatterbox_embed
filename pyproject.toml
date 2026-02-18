@@ -19,7 +19,8 @@ dependencies = [
     "resemble-perth==1.0.1",
     "conformer==0.3.2",
     "safetensors==0.5.3",
-    "nltk>=3.8"
+    "nltk>=3.8",
+    "google-cloud-firestore>=2.13.0"
 ]
 
 [project.urls]
