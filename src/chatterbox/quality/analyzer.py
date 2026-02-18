@@ -1,5 +1,6 @@
 """Quality analyzer for audio chunks."""
 import logging
+import os
 from pathlib import Path
 from typing import List, Tuple
 
@@ -25,6 +26,11 @@ class ChunkQualityAnalyzer:
         self.min_rms_db = -35        # Minimum RMS level
         # Relaxed speaking rate bounds to avoid over-penalizing fast/slow but acceptable delivery
         self.chars_per_second_range = (3, 35)  # Expected characters per second range
+        self.regen_mode = str(os.getenv("CHATTERBOX_QA_REGEN_MODE", "silence_only")).strip().lower()
+        if self.regen_mode not in {"silence_only", "broad", "off"}:
+            logger.warning("Invalid CHATTERBOX_QA_REGEN_MODE=%s, defaulting to silence_only", self.regen_mode)
+            self.regen_mode = "silence_only"
+        logger.info("🧪 QA regen mode: %s", self.regen_mode)
     
     def detect_silence_segments(self, audio_data: np.ndarray, sample_rate: int) -> Tuple[float, List[Tuple[float, float]]]:
         """Detect silence segments in audio using frame-based RMS energy."""
@@ -184,17 +190,25 @@ class ChunkQualityAnalyzer:
             # (or have long leading silence). The generation call doesn't throw, so without this
             # gate the final stitched audio contains multi-second silent spans.
             #
-            # We only request regeneration for issues that strongly indicate "no speech" or
-            # unusably quiet output.
-            regen_triggers = {
-                "excessive_silence",
-                "silence_at_start",
-                "silence_at_end",
-                "too_short",
-                "too_quiet",
-                "low_energy",
-                "fragmented_audio",
-            }
+            if self.regen_mode == "off":
+                regen_triggers = set()
+            elif self.regen_mode == "broad":
+                regen_triggers = {
+                    "excessive_silence",
+                    "silence_at_start",
+                    "silence_at_end",
+                    "too_short",
+                    "too_quiet",
+                    "low_energy",
+                    "fragmented_audio",
+                }
+            else:
+                # We only request regeneration for true silence-type failures.
+                regen_triggers = {
+                    "excessive_silence",
+                    "silence_at_start",
+                    "silence_at_end",
+                }
             should_regenerate = any(issue in regen_triggers for issue in quality_issues)
             
             quality_score = QualityScore(

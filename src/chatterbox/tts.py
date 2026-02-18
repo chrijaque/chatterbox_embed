@@ -5,7 +5,7 @@ import logging
 import time
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
-from typing import List, Optional, Tuple, Dict, Union
+from typing import List, Optional, Tuple, Dict, Union, Any
 from datetime import datetime
 
 import librosa
@@ -77,6 +77,7 @@ class ChatterboxTTS:
         # Quality Analysis toggle (disable to remove overhead)
         # Default to disabled; can be enabled via env CHATTERBOX_ENABLE_QUALITY_ANALYSIS=true
         self.enable_quality_analysis = os.getenv("CHATTERBOX_ENABLE_QUALITY_ANALYSIS", "false").lower() == "true"
+        self.experiment_config = self._init_experiment_config()
         
         # Phase 1: Conditional Caching
         self._cached_conditionals = None
@@ -126,6 +127,68 @@ class ChatterboxTTS:
             )
         except Exception:
             pass
+
+    def _env_bool(self, key: str, default: bool = False) -> bool:
+        raw = os.getenv(key)
+        if raw is None:
+            return default
+        return str(raw).strip().lower() in ("1", "true", "yes", "on")
+
+    def _init_experiment_config(self) -> Dict[str, Any]:
+        """Build experiment toggles so we can isolate one theory per run."""
+        cfg: Dict[str, Any] = {
+            "enabled": self._env_bool("CHATTERBOX_EXPERIMENT_MODE", False),
+            "name": os.getenv("CHATTERBOX_EXPERIMENT_NAME", "default"),
+            "issue_only_mode": self._env_bool("CHATTERBOX_EXPERIMENT_ISSUE_ONLY_MODE", False),
+            "enable_token_guards": self._env_bool("CHATTERBOX_EXPERIMENT_ENABLE_TOKEN_GUARDS", True),
+            "enable_silence_gate": self._env_bool("CHATTERBOX_EXPERIMENT_ENABLE_SILENCE_GATE", True),
+            "enable_qa_regen": self._env_bool("CHATTERBOX_EXPERIMENT_ENABLE_QA_REGEN", True),
+            "enable_retry_param_drift": self._env_bool("CHATTERBOX_EXPERIMENT_ENABLE_RETRY_PARAM_DRIFT", True),
+            "enable_adaptive_voice_params": self._env_bool("CHATTERBOX_EXPERIMENT_ENABLE_ADAPTIVE_VOICE_PARAMS", True),
+            "verbose_chunk_logs": self._env_bool("CHATTERBOX_EXPERIMENT_VERBOSE_CHUNK_LOGS", True),
+            "force_adaptive_blend": None,
+        }
+
+        force_blend_raw = os.getenv("CHATTERBOX_EXPERIMENT_FORCE_ADAPTIVE_BLEND")
+        if force_blend_raw is not None and str(force_blend_raw).strip() != "":
+            try:
+                cfg["force_adaptive_blend"] = max(0.0, min(1.0, float(force_blend_raw)))
+            except Exception:
+                logger.warning(
+                    "⚠️ Invalid CHATTERBOX_EXPERIMENT_FORCE_ADAPTIVE_BLEND=%s (expected float 0..1). Ignoring.",
+                    force_blend_raw,
+                )
+                cfg["force_adaptive_blend"] = None
+
+        # Issue-only mode strips non-essential process heuristics so we can
+        # isolate the real failure path.
+        if not cfg["enabled"]:
+            cfg["name"] = "off"
+            cfg["issue_only_mode"] = False
+            cfg["enable_token_guards"] = True
+            cfg["enable_silence_gate"] = True
+            cfg["enable_qa_regen"] = True
+            cfg["enable_retry_param_drift"] = True
+            cfg["enable_adaptive_voice_params"] = True
+            cfg["force_adaptive_blend"] = None
+        elif cfg["issue_only_mode"]:
+            cfg["enable_retry_param_drift"] = False
+            cfg["enable_adaptive_voice_params"] = False
+            cfg["enable_qa_regen"] = False
+
+        logger.info(
+            "🧪 Experiment config | enabled=%s name=%s issue_only=%s token_guards=%s silence_gate=%s qa_regen=%s retry_param_drift=%s adaptive_voice_params=%s force_blend=%s",
+            cfg["enabled"],
+            cfg["name"],
+            cfg["issue_only_mode"],
+            cfg["enable_token_guards"],
+            cfg["enable_silence_gate"],
+            cfg["enable_qa_regen"],
+            cfg["enable_retry_param_drift"],
+            cfg["enable_adaptive_voice_params"],
+            cfg["force_adaptive_blend"],
+        )
+        return cfg
 
     def _get_or_prepare_conditionals(self, voice_profile_path: str = None,
                                    saved_voice_path: str = None,
@@ -228,8 +291,7 @@ class ChatterboxTTS:
         if hasattr(profile, 've_embedding') and profile.ve_embedding is not None:
             ve_embed = profile.ve_embedding.to(self.device)
         else:
-            # Fallback to random embedding if no voice encoder embedding
-            ve_embed = torch.randn(1, 256).to(self.device)
+            raise ValueError("Voice profile missing ve_embedding")
         
         t3_cond = T3Cond(
             speaker_emb=ve_embed,
@@ -579,6 +641,13 @@ class ChatterboxTTS:
             speech_tokens = drop_invalid_tokens(speech_tokens)
             
             speech_tokens = speech_tokens[speech_tokens < 6561]
+            token_count = int(speech_tokens.numel()) if speech_tokens is not None else 0
+            logger.info(f"🧪 T3 token diagnostics | mode=single_generate token_count={token_count}")
+            if self.experiment_config.get("enable_token_guards", True):
+                if speech_tokens is None or speech_tokens.numel() == 0:
+                    raise RuntimeError("T3 produced empty speech token sequence (likely early EOS)")
+                if token_count < 8:
+                    raise RuntimeError(f"T3 produced too few speech tokens after filtering ({token_count} < 8)")
 
             speech_tokens = speech_tokens.to(self.device)
 
@@ -600,6 +669,8 @@ class ChatterboxTTS:
         cfg_weight=0.3,
         temperature=0.6,
         max_new_tokens_override: Optional[int] = None,
+        return_token_count: bool = False,
+        diagnostics_chunk_id: Optional[int] = None,
     ):
         """
         Generate audio with provided conditionals, optionally overriding exaggeration per chunk.
@@ -651,6 +722,18 @@ class ChatterboxTTS:
             speech_tokens = drop_invalid_tokens(speech_tokens)
             
             speech_tokens = speech_tokens[speech_tokens < 6561]
+            token_count = int(speech_tokens.numel()) if speech_tokens is not None else 0
+            if diagnostics_chunk_id is not None:
+                logger.info(
+                    f"🧪 Chunk {diagnostics_chunk_id} token diagnostics | token_count={token_count}"
+                )
+            else:
+                logger.info(f"🧪 T3 token diagnostics | token_count={token_count}")
+            if self.experiment_config.get("enable_token_guards", True):
+                if speech_tokens is None or speech_tokens.numel() == 0:
+                    raise RuntimeError("T3 produced empty speech token sequence (likely early EOS)")
+                if token_count < 8:
+                    raise RuntimeError(f"T3 produced too few speech tokens after filtering ({token_count} < 8)")
 
             speech_tokens = speech_tokens.to(self.device)
 
@@ -659,7 +742,10 @@ class ChatterboxTTS:
                 ref_dict=chunk_conditionals.gen,
             )
             wav = wav.squeeze(0).detach().cpu().numpy()
-        return torch.from_numpy(wav).unsqueeze(0)
+        wav_tensor = torch.from_numpy(wav).unsqueeze(0)
+        if return_token_count:
+            return wav_tensor, token_count
+        return wav_tensor
 
     def chunk_text(self, text: str, max_chars: int = 500) -> List[ChunkInfo]:
         """
@@ -940,7 +1026,7 @@ class ChatterboxTTS:
         base_exaggeration: float = 0.5,
         base_cfg_weight: float = 0.3,
         *,
-        adaptive_voice_param_blend: float = 1.0,
+        adaptive_voice_param_blend: float = 0.2,
     ) -> List[str]:
         """
         Advanced chunk generation with parallel processing and quality analysis.
@@ -952,7 +1038,8 @@ class ChatterboxTTS:
         :param base_exaggeration: Base exaggeration (will be adapted per chunk)
         :param base_cfg_weight: Base CFG weight (will be adapted/blended per chunk)
         :param adaptive_voice_param_blend: Blend factor for adaptive per-chunk voice params (temp/exag/cfg).
-            - 1.0 (default): preserve current behavior (fully adaptive per chunk)
+            - 0.2 (default): mostly stable base voice with light adaptive movement
+            - 1.0: fully adaptive per chunk
             - 0.0: fully respect base_temperature/base_exaggeration/base_cfg_weight for ALL chunks
         :return: List of file paths to temporary WAV files
         """
@@ -962,6 +1049,10 @@ class ChatterboxTTS:
         except Exception:
             adaptive_voice_param_blend = 1.0
         adaptive_voice_param_blend = max(0.0, min(1.0, adaptive_voice_param_blend))
+        exp_cfg = self.experiment_config or {}
+        force_blend = exp_cfg.get("force_adaptive_blend")
+        if force_blend is not None:
+            adaptive_voice_param_blend = float(force_blend)
         
         # Prepare conditionals once and reuse for all chunks to avoid recomputation
         logger.info(f"🎯 Preparing conditionals once for {len(chunk_infos)} chunks")
@@ -985,11 +1076,33 @@ class ChatterboxTTS:
 
         # QA/retry configuration (protect against "silent chunk" failures)
         try:
-            max_chunk_regen_attempts = int(os.getenv("CHATTERBOX_CHUNK_REGEN_ATTEMPTS", "3"))
+            max_chunk_regen_attempts = int(os.getenv("CHATTERBOX_CHUNK_REGEN_ATTEMPTS", "4"))
         except Exception:
-            max_chunk_regen_attempts = 3
+            max_chunk_regen_attempts = 4
         max_chunk_regen_attempts = max(1, min(6, max_chunk_regen_attempts))
         fail_on_bad_chunk = os.getenv("CHATTERBOX_FAIL_ON_BAD_CHUNK", "true").lower() == "true"
+        silence_peak_threshold = 1e-6
+        silence_rms_threshold = 1e-7
+        logger.info(
+            "🧪 Chunk regen config | quality_analysis=%s fail_on_bad_chunk=%s max_attempts=%d silence_gate=(peak<%.1e,rms<%.1e)",
+            getattr(self, "enable_quality_analysis", False),
+            fail_on_bad_chunk,
+            max_chunk_regen_attempts,
+            silence_peak_threshold,
+            silence_rms_threshold,
+        )
+        logger.info(
+            "🧪 Experiment run | enabled=%s name=%s issue_only=%s token_guards=%s silence_gate=%s qa_regen=%s retry_param_drift=%s adaptive_voice_params=%s blend=%.2f",
+            exp_cfg.get("enabled", False),
+            exp_cfg.get("name", "default"),
+            exp_cfg.get("issue_only_mode", False),
+            exp_cfg.get("enable_token_guards", True),
+            exp_cfg.get("enable_silence_gate", True),
+            exp_cfg.get("enable_qa_regen", True),
+            exp_cfg.get("enable_retry_param_drift", True),
+            exp_cfg.get("enable_adaptive_voice_params", True),
+            adaptive_voice_param_blend,
+        )
 
         for i, chunk_info in enumerate(chunk_infos):
             logger.info(f"🎵 Generating chunk {i+1}/{len(chunk_infos)}: {chunk_info.text[:50]}...")
@@ -1013,9 +1126,15 @@ class ChatterboxTTS:
             except Exception:
                 adaptive_cfg = base_cfg_weight
 
-            temp_used = (base_temperature * (1.0 - adaptive_voice_param_blend)) + (adaptive_temp * adaptive_voice_param_blend)
-            exag_used = (base_exaggeration * (1.0 - adaptive_voice_param_blend)) + (adaptive_exag * adaptive_voice_param_blend)
-            cfg_used = (base_cfg_weight * (1.0 - adaptive_voice_param_blend)) + (adaptive_cfg * adaptive_voice_param_blend)
+            use_adaptive_voice_params = bool(exp_cfg.get("enable_adaptive_voice_params", True))
+            if use_adaptive_voice_params:
+                temp_used = (base_temperature * (1.0 - adaptive_voice_param_blend)) + (adaptive_temp * adaptive_voice_param_blend)
+                exag_used = (base_exaggeration * (1.0 - adaptive_voice_param_blend)) + (adaptive_exag * adaptive_voice_param_blend)
+                cfg_used = (base_cfg_weight * (1.0 - adaptive_voice_param_blend)) + (adaptive_cfg * adaptive_voice_param_blend)
+            else:
+                temp_used = float(base_temperature)
+                exag_used = float(base_exaggeration)
+                cfg_used = float(base_cfg_weight)
 
             # Log effective params for visibility (first chunk + occasional sampling)
             if chunk_info.is_first_chunk or (i % 8 == 0):
@@ -1046,51 +1165,110 @@ class ChatterboxTTS:
                     exag_try = exag_used
                     cfg_try = cfg_used
                 else:
-                    temp_try = max(0.5, temp_used - (0.08 * (attempt - 1)))
-                    cfg_try = min(0.8, cfg_used + (0.08 * (attempt - 1)))
-                    exag_try = max(0.1, exag_used - (0.05 * (attempt - 1)))
+                    if exp_cfg.get("enable_retry_param_drift", True):
+                        temp_try = max(0.5, temp_used - (0.08 * (attempt - 1)))
+                        cfg_try = min(0.8, cfg_used + (0.08 * (attempt - 1)))
+                        exag_try = max(0.1, exag_used - (0.05 * (attempt - 1)))
+                    else:
+                        temp_try = temp_used
+                        cfg_try = cfg_used
+                        exag_try = exag_used
 
-                audio_tensor = self._generate_with_prepared_conditionals(
-                    text=chunk_info.text,
-                    conditionals=self.conds,
-                    exaggeration=exag_try,
-                    temperature=temp_try,
-                    cfg_weight=cfg_try,
-                    repetition_penalty=rep_pen,
-                    min_p=min_p,
-                    top_p=top_p,
-                )
-                torchaudio.save(temp_wav_path, audio_tensor, self.sr)
-
-                if not getattr(self, "enable_quality_analysis", False):
-                    last_qs = QualityScore(
-                        overall_score=100.0,
-                        issues=[],
-                        duration=float(audio_tensor.shape[-1]) / float(self.sr),
-                        silence_ratio=0.0,
-                        peak_db=0.0,
-                        rms_db=0.0,
-                        should_regenerate=False,
-                    )
-                    break
-
-                qs = self.quality_analyzer.analyze_chunk_quality(temp_wav_path, chunk_info)
-                last_qs = qs
-
-                if not qs.should_regenerate:
-                    break
-
-                logger.warning(
-                    f"⚠️ Chunk {chunk_info.id} failed QA (attempt {attempt}/{max_chunk_regen_attempts}) "
-                    f"issues={qs.issues} silence_ratio={qs.silence_ratio:.2f} dur={qs.duration:.2f}s "
-                    f"-> retrying with temp={temp_try:.2f} cfg={cfg_try:.2f} exag={exag_try:.2f}"
-                )
-
-                if attempt == max_chunk_regen_attempts and fail_on_bad_chunk:
-                    raise RuntimeError(
-                        f"Chunk {chunk_info.id} failed QA after {max_chunk_regen_attempts} attempts: {qs.issues}"
+                try:
+                    audio_tensor, token_count = self._generate_with_prepared_conditionals(
+                        text=chunk_info.text,
+                        conditionals=self.conds,
+                        exaggeration=exag_try,
+                        temperature=temp_try,
+                        cfg_weight=cfg_try,
+                        repetition_penalty=rep_pen,
+                        min_p=min_p,
+                        top_p=top_p,
+                        return_token_count=True,
+                        diagnostics_chunk_id=chunk_info.id,
                     )
 
+                    # Hard silence gate before writing WAV to disk.
+                    x = audio_tensor.detach().cpu().numpy().ravel()
+                    peak = float(np.max(np.abs(x))) if x.size else 0.0
+                    rms = float(np.sqrt(np.mean(x.astype(np.float64) ** 2))) if x.size else 0.0
+                    logger.info(
+                        f"🧪 Chunk {chunk_info.id} diagnostics | attempt={attempt}/{max_chunk_regen_attempts} "
+                        f"token_count={token_count} peak={peak:.3e} rms={rms:.3e}"
+                    )
+
+                    if exp_cfg.get("enable_silence_gate", True) and (
+                        x.size == 0 or (peak < silence_peak_threshold and rms < silence_rms_threshold)
+                    ):
+                        retry_reason = (
+                            f"silent_output(size={x.size}, peak={peak:.3e}, rms={rms:.3e})"
+                        )
+                        logger.warning(
+                            f"⚠️ Chunk {chunk_info.id} retry reason={retry_reason} "
+                            f"(attempt {attempt}/{max_chunk_regen_attempts})"
+                        )
+                        if attempt == max_chunk_regen_attempts and fail_on_bad_chunk:
+                            raise RuntimeError(
+                                f"Chunk {chunk_info.id} failed silence gate after "
+                                f"{max_chunk_regen_attempts} attempts: {retry_reason}"
+                            )
+                        continue
+
+                    torchaudio.save(temp_wav_path, audio_tensor, self.sr)
+
+                    qa_regen_enabled = bool(exp_cfg.get("enable_qa_regen", True))
+                    if not qa_regen_enabled or not getattr(self, "enable_quality_analysis", False):
+                        last_qs = QualityScore(
+                            overall_score=100.0,
+                            issues=[],
+                            duration=float(audio_tensor.shape[-1]) / float(self.sr),
+                            silence_ratio=0.0,
+                            peak_db=0.0,
+                            rms_db=0.0,
+                            should_regenerate=False,
+                        )
+                        break
+
+                    qs = self.quality_analyzer.analyze_chunk_quality(temp_wav_path, chunk_info)
+                    last_qs = qs
+
+                    if not qs.should_regenerate:
+                        break
+
+                    retry_reason = f"quality_silence_gate(issues={qs.issues})"
+                    logger.warning(
+                        f"⚠️ Chunk {chunk_info.id} retry reason={retry_reason} "
+                        f"(attempt {attempt}/{max_chunk_regen_attempts}) "
+                        f"silence_ratio={qs.silence_ratio:.2f} dur={qs.duration:.2f}s "
+                        f"-> retrying with temp={temp_try:.2f} cfg={cfg_try:.2f} exag={exag_try:.2f}"
+                    )
+
+                    if attempt == max_chunk_regen_attempts and fail_on_bad_chunk:
+                        raise RuntimeError(
+                            f"Chunk {chunk_info.id} failed QA after {max_chunk_regen_attempts} attempts: {qs.issues}"
+                        )
+                except Exception as e:
+                    retry_reason = f"generation_error({type(e).__name__}: {e})"
+                    logger.warning(
+                        f"⚠️ Chunk {chunk_info.id} retry reason={retry_reason} "
+                        f"(attempt {attempt}/{max_chunk_regen_attempts})"
+                    )
+                    if attempt == max_chunk_regen_attempts:
+                        raise
+                    continue
+
+            if exp_cfg.get("verbose_chunk_logs", True):
+                logger.info(
+                    "🧪 Chunk %s done | qa_score=%s issues=%s",
+                    chunk_info.id,
+                    f"{last_qs.overall_score:.1f}" if last_qs is not None else "n/a",
+                    last_qs.issues if last_qs is not None else [],
+                )
+
+            if not os.path.exists(temp_wav_path):
+                raise RuntimeError(
+                    f"Chunk {chunk_info.id}: no valid audio was produced after {max_chunk_regen_attempts} attempts"
+                )
             wav_paths.append(temp_wav_path)
             if last_qs is not None:
                 quality_scores.append(last_qs)
@@ -1204,7 +1382,7 @@ class ChatterboxTTS:
         cfg_weight: float = 0.5,
         pause_scale: float = 1.0,
         *,
-        adaptive_voice_param_blend: float = 1.0,
+        adaptive_voice_param_blend: float = 0.2,
     ) -> Tuple[torch.Tensor, int, Dict]:
         """
         Full TTS pipeline for long texts: chunk → generate → stitch → clean.
@@ -1315,8 +1493,8 @@ class ChatterboxTTS:
                            *, user_id: str = "", story_id: str = "", profile_path: str = "", voice_name: str = "",
                            # New optional TTS parameters
                            temperature: float = None, exaggeration: float = None, 
-                           cfg_weight: float = None,
-                           adaptive_voice_param_blend: float = 1.0) -> Dict:
+                          cfg_weight: float = None,
+                          adaptive_voice_param_blend: float = 0.2) -> Dict:
         """
         Generate TTS story with voice profile from base64.
         

@@ -907,6 +907,7 @@ class ChatterboxVC:
                 exaggeration=0.7,
                 cfg_weight=0.45,
                 pause_scale=0.9,
+                adaptive_voice_param_blend=0.2,
             )
             sample_audio = audio_tensor
             logger.info(f"    - Sample audio generated via TTS, shape: {sample_audio.shape}")
