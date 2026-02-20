@@ -640,7 +640,7 @@ class ChatterboxTTS:
             speech_tokens = self.t3.inference(
                 t3_cond=self.conds.t3,
                 text_tokens=text_tokens,
-                max_new_tokens=1000,  # TODO: use the value in config
+                max_new_tokens=750,  # Test A default: reduce long-tail degeneration risk
                 temperature=temperature,
                 cfg_weight=cfg_weight,
                 repetition_penalty=repetition_penalty,
@@ -723,7 +723,7 @@ class ChatterboxTTS:
             speech_tokens = self.t3.inference(
                 t3_cond=chunk_conditionals.t3,
                 text_tokens=text_tokens,
-                max_new_tokens=max_new_tokens_override or 1000,  # dynamic cap for long chunks
+                max_new_tokens=max_new_tokens_override or 750,  # Test A default cap
                 show_progress=(
                     bool(self.experiment_config.get("show_sampling_progress", False))
                     if (self.experiment_config or {}).get("enabled", False)
@@ -1609,7 +1609,7 @@ class ChatterboxTTS:
                 text=text,
                 voice_profile_path=temp_profile_path,
                 output_path="./temp_tts_output.wav",
-                max_chars=500,
+                max_chars=350,
                 pause_ms=150,
                 temperature=final_temperature,
                 exaggeration=final_exaggeration,
