@@ -1724,53 +1724,58 @@ class ChatterboxTTS:
                 "duration": generation_metadata.get("duration_sec", 0)
             }
 
-            # Firestore write for stories/{story_id}
-            try:
-                from google.cloud import firestore
-                client = firestore.Client()
-                from google.cloud.firestore import SERVER_TIMESTAMP  # type: ignore
-                if story_id:
-                    doc = client.collection("stories").document(story_id)
-                    # Build new audio version entry
-                    # Use version_id from path generation (already generated above)
-                    new_version = {
-                        "id": version_id,
-                        "voiceId": voice_id,
-                        "voiceName": voice_name,
-                        "audioUrl": r2_url or "",
-                        "url": r2_url or "",
-                        "createdAt": SERVER_TIMESTAMP,
-                        "updatedAt": SERVER_TIMESTAMP,
-                        "service": "chatterbox",
-                        "metadata": {
-                            "format": "mp3",
-                            "size": len(mp3_bytes),
-                            "duration": generation_metadata.get("duration_sec", 0) if 'generation_metadata' in locals() else 0,
+            # Firestore updates should happen via callback to the app.
+            # Direct worker writes are opt-in for environments with configured ADC.
+            enable_direct_firestore_update = os.getenv("CHATTERBOX_ENABLE_DIRECT_FIRESTORE_UPDATE", "false").lower() == "true"
+            if enable_direct_firestore_update:
+                try:
+                    from google.cloud import firestore
+                    client = firestore.Client()
+                    from google.cloud.firestore import SERVER_TIMESTAMP  # type: ignore
+                    if story_id:
+                        doc = client.collection("stories").document(story_id)
+                        # Build new audio version entry
+                        # Use version_id from path generation (already generated above)
+                        new_version = {
+                            "id": version_id,
+                            "voiceId": voice_id,
                             "voiceName": voice_name,
-                            "r2Path": r2_path,  # Store R2 path in metadata
-                        },
-                    }
-                    # Update atomically: set status and push new version
-                    doc.set({
-                        "audioStatus": "ready",
-                        "audioUrl": r2_url or "",
-                        "updatedAt": SERVER_TIMESTAMP,
-                    }, merge=True)
-                    # Firestore array union append (fallback to read-modify-write if needed)
-                    try:
-                        from google.cloud.firestore_v1 import ArrayUnion
-                        doc.update({"audioVersions": ArrayUnion([new_version])})
-                    except Exception:
-                        # Read-modify-write fallback
-                        snap = doc.get()
-                        existing = []
-                        if snap.exists and isinstance(snap.to_dict().get("audioVersions"), list):
-                            existing = snap.to_dict()["audioVersions"]
-                        existing.append(new_version)
-                        doc.set({"audioVersions": existing}, merge=True)
-                    result["firestore_story_id"] = story_id
-            except Exception as fe:
-                logger.warning(f"⚠️ Firestore update for story failed: {fe}")
+                            "audioUrl": r2_url or "",
+                            "url": r2_url or "",
+                            "createdAt": SERVER_TIMESTAMP,
+                            "updatedAt": SERVER_TIMESTAMP,
+                            "service": "chatterbox",
+                            "metadata": {
+                                "format": "mp3",
+                                "size": len(mp3_bytes),
+                                "duration": generation_metadata.get("duration_sec", 0) if 'generation_metadata' in locals() else 0,
+                                "voiceName": voice_name,
+                                "r2Path": r2_path,  # Store R2 path in metadata
+                            },
+                        }
+                        # Update atomically: set status and push new version
+                        doc.set({
+                            "audioStatus": "ready",
+                            "audioUrl": r2_url or "",
+                            "updatedAt": SERVER_TIMESTAMP,
+                        }, merge=True)
+                        # Firestore array union append (fallback to read-modify-write if needed)
+                        try:
+                            from google.cloud.firestore_v1 import ArrayUnion
+                            doc.update({"audioVersions": ArrayUnion([new_version])})
+                        except Exception:
+                            # Read-modify-write fallback
+                            snap = doc.get()
+                            existing = []
+                            if snap.exists and isinstance(snap.to_dict().get("audioVersions"), list):
+                                existing = snap.to_dict()["audioVersions"]
+                            existing.append(new_version)
+                            doc.set({"audioVersions": existing}, merge=True)
+                        result["firestore_story_id"] = story_id
+                except Exception as fe:
+                    logger.warning(f"⚠️ Firestore update for story failed: {fe}")
+            else:
+                logger.info("ℹ️ Skipping direct Firestore write in worker (callback endpoint is source of truth)")
             
             logger.info(f"✅ TTS story generated successfully!")
             logger.info(f"  - Audio size: {len(mp3_bytes)} bytes")
