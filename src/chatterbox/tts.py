@@ -142,7 +142,8 @@ class ChatterboxTTS:
 
     def _log_experiment(self, message: str, *args) -> None:
         """Promote experiment diagnostics to warning level for visibility in worker logs."""
-        if (self.experiment_config or {}).get("enabled", False):
+        exp_cfg = getattr(self, "experiment_config", {}) or {}
+        if exp_cfg.get("enabled", False):
             logger.warning(message, *args)
         else:
             logger.info(message, *args)
