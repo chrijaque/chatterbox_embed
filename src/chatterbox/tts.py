@@ -38,6 +38,7 @@ from .stitching import AdvancedStitcher
 
 # Configure logging
 logger = logging.getLogger(__name__)
+CHATTERBOX_RUNTIME_VERSION = "2026-02-22-testA-750-350"
 
 
 class ChatterboxTTS:
