@@ -38,7 +38,7 @@ from .stitching import AdvancedStitcher
 
 # Configure logging
 logger = logging.getLogger(__name__)
-CHATTERBOX_RUNTIME_VERSION = "2026-02-22-testA-750-350"
+CHATTERBOX_RUNTIME_VERSION = "2026-02-22-testB-650-320"
 
 
 class ChatterboxTTS:
@@ -642,7 +642,7 @@ class ChatterboxTTS:
             speech_tokens = self.t3.inference(
                 t3_cond=self.conds.t3,
                 text_tokens=text_tokens,
-                max_new_tokens=750,  # Test A default: reduce long-tail degeneration risk
+                max_new_tokens=650,  # Test B default: tighter cap for tail-degeneration check
                 temperature=temperature,
                 cfg_weight=cfg_weight,
                 repetition_penalty=repetition_penalty,
@@ -725,7 +725,7 @@ class ChatterboxTTS:
             speech_tokens = self.t3.inference(
                 t3_cond=chunk_conditionals.t3,
                 text_tokens=text_tokens,
-                max_new_tokens=max_new_tokens_override or 750,  # Test A default cap
+                max_new_tokens=max_new_tokens_override or 650,  # Test B default cap
                 show_progress=(
                     bool(self.experiment_config.get("show_sampling_progress", False))
                     if (self.experiment_config or {}).get("enabled", False)
@@ -1611,7 +1611,7 @@ class ChatterboxTTS:
                 text=text,
                 voice_profile_path=temp_profile_path,
                 output_path="./temp_tts_output.wav",
-                max_chars=350,
+                max_chars=320,
                 pause_ms=150,
                 temperature=final_temperature,
                 exaggeration=final_exaggeration,
