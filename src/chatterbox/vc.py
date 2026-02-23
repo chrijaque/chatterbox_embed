@@ -890,44 +890,63 @@ class ChatterboxVC:
             
             # Step 3: Generate sample audio
             logger.info(f"  - Step 3: Generating sample audio...")
-            # Use the TTS stitcher with the saved profile for consistent loudness
-            # Lazy import to avoid circular dependency
-            from .tts import ChatterboxTTS
-            tts_model = ChatterboxTTS.from_pretrained(self.device)
-            sample_text_final = sample_text if sample_text else (
-                f"Hello, this is the voice profile of {voice_name or 'this voice'}. I can be used to narrate whimsical stories and fairytales."
-            )
-            audio_tensor, sr, _meta = tts_model.generate_long_text(
-                text=sample_text_final,
-                voice_profile_path=profile_local_path,
-                output_path="./temp_sample_preview.wav",
-                max_chars=300,
-                pause_ms=90,
-                temperature=0.9,
-                exaggeration=0.7,
-                cfg_weight=0.45,
-                pause_scale=0.9,
-                adaptive_voice_param_blend=0.2,
-            )
-            sample_audio = audio_tensor
-            logger.info(f"    - Sample audio generated via TTS, shape: {sample_audio.shape}")
-
-            # Apply final loudness normalization to sample
+            sample_mp3_bytes = None
+            sample_generated_via = "tts"
             try:
-                sample_audio = self.apply_loudness_normalization_tensor(sample_audio, self.sr)
-                logger.info("    - Sample loudness normalized to target LUFS")
-            except Exception as _e_ln:
-                logger.warning(f"    - Sample loudness normalization skipped: {_e_ln}")
+                # Use the TTS stitcher with the saved profile for consistent loudness
+                # Lazy import to avoid circular dependency
+                from .tts import ChatterboxTTS
+                tts_model = ChatterboxTTS.from_pretrained(self.device)
+                sample_text_final = sample_text if sample_text else (
+                    f"Hello, this is the voice profile of {voice_name or 'this voice'}. I can be used to narrate whimsical stories and fairytales."
+                )
+                audio_tensor, sr, _meta = tts_model.generate_long_text(
+                    text=sample_text_final,
+                    voice_profile_path=profile_local_path,
+                    output_path="./temp_sample_preview.wav",
+                    max_chars=300,
+                    pause_ms=90,
+                    temperature=0.9,
+                    exaggeration=0.7,
+                    cfg_weight=0.45,
+                    pause_scale=0.9,
+                    adaptive_voice_param_blend=0.2,
+                )
+                sample_audio = audio_tensor
+                logger.info(f"    - Sample audio generated via TTS, shape: {sample_audio.shape}")
+
+                # Apply final loudness normalization to sample
+                try:
+                    sample_audio = self.apply_loudness_normalization_tensor(sample_audio, self.sr)
+                    logger.info("    - Sample loudness normalized to target LUFS")
+                except Exception as _e_ln:
+                    logger.warning(f"    - Sample loudness normalization skipped: {_e_ln}")
+
+                sample_mp3_bytes = tensor_to_mp3_bytes(sample_audio, self.sr, "96k")
+            except Exception as tts_sample_e:
+                # TTS diagnostics/instrumentation issues must not block VC.
+                sample_generated_via = "reference_fallback"
+                logger.warning(
+                    "    - TTS sample generation failed (%s). Falling back to reference audio sample.",
+                    tts_sample_e,
+                )
+                ref_audio, ref_sr = torchaudio.load(processed_audio_path)
+                if ref_audio.dim() == 2 and ref_audio.shape[0] > 1:
+                    ref_audio = ref_audio.mean(dim=0, keepdim=True)
+                if ref_sr != self.sr:
+                    ref_audio = torchaudio.functional.resample(ref_audio, ref_sr, self.sr)
+                sample_audio = ref_audio.squeeze(0).float()
+                sample_mp3_bytes = tensor_to_mp3_bytes(sample_audio, self.sr, "96k")
             
             # Step 4: Convert sample to MP3 and save (local temp)
             logger.info(f"  - Step 4: Converting sample to MP3...")
-            sample_mp3_bytes = tensor_to_mp3_bytes(sample_audio, self.sr, "96k")
             sample_local_path = sample_filename
             
             # Save sample to file
             with open(sample_local_path, 'wb') as f:
                 f.write(sample_mp3_bytes)
             logger.info(f"    - Sample audio saved: {sample_local_path}")
+            logger.info(f"    - Sample source: {sample_generated_via}")
             try:
                 import hashlib
                 _sha = hashlib.sha256(sample_mp3_bytes).hexdigest()[:16]
