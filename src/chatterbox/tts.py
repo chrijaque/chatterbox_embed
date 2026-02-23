@@ -77,8 +77,15 @@ class ChatterboxTTS:
         self.enable_parallel_processing = False  # Disabled as requested
         # Quality Analysis toggle (disable to remove overhead)
         # Default to disabled; can be enabled via env CHATTERBOX_ENABLE_QUALITY_ANALYSIS=true
+        self.prod_mode = os.getenv("CHATTERBOX_PROD_MODE", "false").strip().lower() in ("1", "true", "yes", "on")
         self.enable_quality_analysis = os.getenv("CHATTERBOX_ENABLE_QUALITY_ANALYSIS", "false").lower() == "true"
+        if self.prod_mode:
+            self.enable_quality_analysis = False
         self.experiment_config = self._init_experiment_config()
+        if self.prod_mode:
+            self.experiment_config["enabled"] = False
+            self.experiment_config["verbose_chunk_logs"] = False
+            self.experiment_config["show_sampling_progress"] = False
         if self.experiment_config.get("enabled", False):
             logger.warning(
                 "🧪 Experiment instrumentation active | version=2026-02-18b name=%s",
@@ -642,7 +649,7 @@ class ChatterboxTTS:
             speech_tokens = self.t3.inference(
                 t3_cond=self.conds.t3,
                 text_tokens=text_tokens,
-                max_new_tokens=900,  # Test B default: tighter cap for tail-degeneration check
+                max_new_tokens=1000,  # Test B default: tighter cap for tail-degeneration check
                 temperature=temperature,
                 cfg_weight=cfg_weight,
                 repetition_penalty=repetition_penalty,
@@ -725,7 +732,7 @@ class ChatterboxTTS:
             speech_tokens = self.t3.inference(
                 t3_cond=chunk_conditionals.t3,
                 text_tokens=text_tokens,
-                max_new_tokens=max_new_tokens_override or 900,  # Test B default cap
+                max_new_tokens=max_new_tokens_override or 1000,  # Test B default cap
                 show_progress=(
                     bool(self.experiment_config.get("show_sampling_progress", False))
                     if (self.experiment_config or {}).get("enabled", False)
@@ -1611,7 +1618,7 @@ class ChatterboxTTS:
                 text=text,
                 voice_profile_path=temp_profile_path,
                 output_path="./temp_tts_output.wav",
-                max_chars=320,
+                max_chars=500,
                 pause_ms=150,
                 temperature=final_temperature,
                 exaggeration=final_exaggeration,
