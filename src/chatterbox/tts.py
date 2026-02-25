@@ -1436,12 +1436,6 @@ class ChatterboxTTS:
         logger.info(f"🎵 Starting TTS processing for {len(text)} characters")
         logger.info(f"🔍 Output path: {output_path}")
         
-        # Safety check for extremely long texts
-        if len(text) > 13000:
-            logger.warning(f"⚠️ Very long text ({len(text)} chars) - truncating to safe length")
-            text = text[:13000] + "... [truncated]"
-            logger.info(f"📝 Truncated text to {len(text)} characters")
-        
         chunk_infos = self.chunk_text(text, max_chars)
         logger.info(f"📦 Split into {len(chunk_infos)} intelligent chunks")
         
@@ -1930,12 +1924,6 @@ class ChatterboxTTS:
         logger.info(f"🎵 Starting optimized TTS processing for {len(text)} characters (saved voice + audio prompt)")
         logger.info(f"🔍 Output path: {output_path}")
         
-        # Safety check for extremely long texts
-        if len(text) > 13000:
-            logger.warning(f"⚠️ Very long text ({len(text)} chars) - truncating to safe length")
-            text = text[:13000] + "... [truncated]"
-            logger.info(f"📝 Truncated text to {len(text)} characters")
-        
         chunk_infos = self.chunk_text(text, max_chars)
         logger.info(f"📦 Split into {len(chunk_infos)} intelligent chunks")
         
@@ -2006,12 +1994,6 @@ class ChatterboxTTS:
         """
         logger.info(f"🎵 Starting optimized TTS processing for {len(text)} characters (audio prompt)")
         logger.info(f"🔍 Output path: {output_path}")
-        
-        # Safety check for extremely long texts
-        if len(text) > 13000:
-            logger.warning(f"⚠️ Very long text ({len(text)} chars) - truncating to safe length")
-            text = text[:13000] + "... [truncated]"
-            logger.info(f"📝 Truncated text to {len(text)} characters")
         
         chunk_infos = self.chunk_text(text, max_chars)
         logger.info(f"📦 Split into {len(chunk_infos)} intelligent chunks")
