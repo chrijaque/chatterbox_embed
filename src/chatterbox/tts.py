@@ -28,7 +28,7 @@ from .models.t3.modules.cond_enc import T3Cond
 from .utils import PYDUB_AVAILABLE, _get_git_sha, _maybe_log_seg_levels, REPO_ID
 from .text.normalization import punc_norm
 from .storage.bucket_resolver import resolve_bucket_name, is_r2_bucket
-from .storage.r2_storage import upload_to_r2, download_from_r2
+from .storage.r2_storage import upload_to_r2, download_from_r2, upload_http
 from .audio.conversion import tensor_to_mp3_bytes, tensor_to_audiosegment, tensor_to_wav_bytes
 from .conditionals import Conditionals
 from .chunking import ContentType, ChunkInfo, SmartChunker, AdvancedTextSanitizer
@@ -1511,7 +1511,9 @@ class ChatterboxTTS:
                 raise ValueError(error_msg)
             
             logger.info(f"✅ Using R2 upload for bucket: {resolved_bucket}")
-            return upload_to_r2(data, dest_name, content_type, metadata)
+            # Do not attach custom object metadata. R2 signing is brittle with
+            # boto3 user-metadata + checksum headers (SignatureDoesNotMatch).
+            return upload_to_r2(data, dest_name, content_type, None, bucket_name=resolved_bucket)
             
         except Exception as e:
             logger.error(f"❌ Failed to upload: {e}")
@@ -1643,11 +1645,33 @@ class ChatterboxTTS:
                 logger.warning(f"Invalid story_type '{final_story_type}', defaulting to 'user'")
                 final_story_type = 'user'
             
-            # Determine storage path based on admin generation flag
+            # Determine storage path based on admin generation flag or an exact app-issued key
             is_admin_gen = (metadata or {}).get('is_admin_generation', False) if isinstance(metadata, dict) else False
-            storage_path_hint = (metadata or {}).get('storage_path', '') if isinstance(metadata, dict) else ''
-            
-            if is_admin_gen and storage_path_hint:
+            storage_path_hint = ''
+            upload_url = None
+            if isinstance(metadata, dict):
+                storage_path_hint = (
+                    metadata.get('storage_path')
+                    or metadata.get('upload_path')
+                    or metadata.get('r2_path')
+                    or ''
+                )
+                upload_url = metadata.get('upload_url') or metadata.get('uploadUrl')
+
+            def _is_exact_private_audio_key(path: str) -> bool:
+                cleaned = str(path or '').lstrip('/')
+                if not cleaned or '..' in cleaned:
+                    return False
+                return (
+                    cleaned.startswith('private/users/')
+                    and cleaned.endswith('.mp3')
+                    and cleaned.count('/') >= 6
+                )
+
+            if _is_exact_private_audio_key(storage_path_hint):
+                r2_path = str(storage_path_hint).lstrip('/')
+                version_id = r2_path.rsplit('/', 1)[-1][:-4]
+            elif is_admin_gen and storage_path_hint:
                 # Admin generation: use provided storage path (R2)
                 import random
                 suffix = ''.join(random.choices('abcdefghijklmnopqrstuvwxyz0123456789', k=4))
@@ -1670,34 +1694,35 @@ class ChatterboxTTS:
             logger.info(f"    - Story type: {final_story_type}")
             logger.info(f"    - Is admin generation: {is_admin_gen}")
             logger.info(f"    - Version ID: {version_id}")
+            logger.info(f"    - Has presigned upload URL: {bool(upload_url)}")
             
-            # Upload directly to R2
+            # Upload directly to R2. Prefer the app-issued presigned PUT (JS SDK signing
+            # already works against this bucket); fall back to boto3 without object metadata.
             r2_url = None
             try:
-                # Always use R2 bucket for user stories
-                r2_url = self.upload_to_storage(
-                    data=mp3_bytes,
-                    destination_blob_name=r2_path,
-                    content_type="audio/mpeg",
-                    metadata={
-                        "bucket_name": "minstraly-storage",  # Always R2 for user stories
-                        "user_id": user_id,
-                        "story_id": story_id,
-                        "voice_id": voice_id,
-                        "voice_name": voice_name,
-                        "language": language,
-                        "story_type": final_story_type,
-                        "text_length": len(text),
-                        "generation_time": time.time() - start_time,
-                        "audio_size": len(mp3_bytes),
-                        "duration": generation_metadata.get("duration_sec", 0),
-                        "version_id": version_id,  # Add version ID to metadata for easier discovery
-                    }
-                )
-                if r2_url:
-                    logger.info(f"    - Uploaded successfully to R2: {r2_url}")
-                else:
-                    logger.warning("⚠️ R2 upload did not return URL")
+                uploaded = False
+                if isinstance(upload_url, str) and upload_url.startswith('http'):
+                    logger.info("    - Uploading via app-issued presigned PUT")
+                    uploaded = upload_http(upload_url, mp3_bytes, content_type="audio/mpeg")
+                    if uploaded:
+                        r2_url = r2_path
+                    else:
+                        logger.warning("⚠️ Presigned PUT failed; falling back to R2 SDK upload")
+
+                if not uploaded:
+                    r2_url = self.upload_to_storage(
+                        data=mp3_bytes,
+                        destination_blob_name=r2_path,
+                        content_type="audio/mpeg",
+                        metadata={
+                            "bucket_name": "minstraly-storage",  # Always R2 for user stories
+                        }
+                    )
+                    uploaded = bool(r2_url)
+
+                if not uploaded:
+                    raise RuntimeError(f"R2 upload failed for {r2_path}")
+                logger.info(f"    - Uploaded successfully to R2: {r2_url}")
             except Exception as upload_error:
                 logger.error(f"❌ R2 upload failed: {upload_error}")
                 import traceback
@@ -1721,7 +1746,7 @@ class ChatterboxTTS:
                 "storage_path": r2_path,  # R2 path (primary)
                 "r2_path": r2_path,  # Explicit R2 path for callback validation
                 "r2_url": r2_url,  # Explicit R2 URL
-                "audio_url": r2_url,  # Alias for compatibility
+                "audio_url": r2_url or r2_path,  # Alias for compatibility
                 # Backward compatibility keys (deprecated, use storage_url/storage_path)
                 "firebase_url": r2_url,
                 "firebase_path": r2_path,

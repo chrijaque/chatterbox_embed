@@ -9,10 +9,20 @@ from urllib.request import Request, urlopen
 
 logger = logging.getLogger(__name__)
 
-# boto3 1.36+ signs default CRC32 checksum headers. Cloudflare R2 rejects those
-# requests with SignatureDoesNotMatch. Force the pre-1.36 behavior.
-os.environ.setdefault("AWS_REQUEST_CHECKSUM_CALCULATION", "when_required")
-os.environ.setdefault("AWS_RESPONSE_CHECKSUM_VALIDATION", "when_required")
+# boto3 1.36+ signs CRC32 checksum headers that Cloudflare R2 rejects with
+# SignatureDoesNotMatch. Overwrite even if the environment already set the new default.
+os.environ["AWS_REQUEST_CHECKSUM_CALCULATION"] = "when_required"
+os.environ["AWS_RESPONSE_CHECKSUM_VALIDATION"] = "when_required"
+
+_CHECKSUM_HEADER_PREFIXES = (
+    "x-amz-checksum-",
+    "x-amz-sdk-checksum-",
+)
+_CHECKSUM_HEADER_NAMES = {
+    "x-amz-trailer",
+    "x-amz-decoded-content-length",
+    "x-amz-sdk-checksum-algorithm",
+}
 
 
 def _clean_env(value: Optional[str]) -> str:
@@ -24,12 +34,33 @@ def _is_http_url(value: str) -> bool:
     return parsed.scheme in ("http", "https") and bool(parsed.netloc)
 
 
+def _strip_flexible_checksums(request, **_kwargs):
+    headers = getattr(request, "headers", None)
+    if not headers:
+        return
+    for name in list(headers.keys()):
+        lower = str(name).lower()
+        if lower in _CHECKSUM_HEADER_NAMES or lower.startswith(_CHECKSUM_HEADER_PREFIXES):
+            headers.pop(name, None)
+
+
+def _drop_checksum_param(params, **_kwargs):
+    params.pop("ChecksumAlgorithm", None)
+    params.pop("ChecksumCRC32", None)
+    params.pop("ChecksumCRC32C", None)
+    params.pop("ChecksumSHA1", None)
+    params.pop("ChecksumSHA256", None)
+
+
 def _r2_client_config():
     from botocore.config import Config
 
     kwargs = {
         "signature_version": "s3v4",
-        "s3": {"addressing_style": "path"},
+        "s3": {
+            "addressing_style": "path",
+            "payload_signing_enabled": False,
+        },
     }
     try:
         return Config(
@@ -65,7 +96,7 @@ def get_r2_client():
         r2_access_key_id[:4],
     )
 
-    return boto3.client(
+    client = boto3.client(
         "s3",
         endpoint_url=r2_endpoint,
         aws_access_key_id=r2_access_key_id,
@@ -73,6 +104,14 @@ def get_r2_client():
         region_name=_clean_env(os.getenv("R2_REGION")) or "auto",
         config=_r2_client_config(),
     )
+    try:
+        client.meta.events.register("before-parameter-build.s3.PutObject", _drop_checksum_param)
+        client.meta.events.register("before-parameter-build.s3.GetObject", _drop_checksum_param)
+        client.meta.events.register("before-sign.s3.PutObject", _strip_flexible_checksums)
+        client.meta.events.register("before-sign.s3.GetObject", _strip_flexible_checksums)
+    except Exception as hook_error:
+        logger.warning("⚠️ Could not register R2 checksum stripping hooks: %s", hook_error)
+    return client
 
 
 def download_http(url: str) -> Optional[bytes]:
@@ -87,6 +126,28 @@ def download_http(url: str) -> Optional[bytes]:
         logger.error("❌ HTTP download failed: %s", e)
         logger.error("❌ HTTP download traceback: %s", traceback.format_exc())
         return None
+
+
+def upload_http(url: str, data: bytes, content_type: str = "application/octet-stream") -> bool:
+    """Upload bytes to an HTTP(S) URL (used for app-issued R2 presigned PUT URLs)."""
+    try:
+        request = Request(
+            url,
+            data=data,
+            method="PUT",
+            headers={"Content-Type": content_type},
+        )
+        with urlopen(request, timeout=180) as response:
+            status = getattr(response, "status", 200)
+            if status >= 400:
+                logger.error("❌ HTTP upload failed with status %s", status)
+                return False
+        logger.info("✅ Uploaded over HTTP (%s bytes)", len(data))
+        return True
+    except Exception as e:
+        logger.error("❌ HTTP upload failed: %s", e)
+        logger.error("❌ HTTP upload traceback: %s", traceback.format_exc())
+        return False
 
 
 def _encode_metadata_value(value: str) -> str:
@@ -130,23 +191,37 @@ def upload_to_r2(data: bytes, destination_key: str, content_type: str = "applica
         r2_bucket_name = bucket_name or os.getenv('R2_BUCKET_NAME', 'minstraly-storage')
         r2_public_url = os.getenv('NEXT_PUBLIC_R2_PUBLIC_URL') or os.getenv('R2_PUBLIC_URL')
         
-        extra_args = {
-            'ContentType': content_type,
-        }
+        def _put_object(**extra_args):
+            s3_client.put_object(
+                Bucket=r2_bucket_name,
+                Key=destination_key,
+                Body=data,
+                **extra_args,
+            )
+
+        encoded_metadata = None
         if metadata:
             encoded_metadata = {}
             for k, v in metadata.items():
-                key_str = str(k)
-                value_str = str(v)
-                encoded_metadata[key_str] = _encode_metadata_value(value_str)
-            extra_args['Metadata'] = encoded_metadata
-        
-        s3_client.put_object(
-            Bucket=r2_bucket_name,
-            Key=destination_key,
-            Body=data,
-            **extra_args
-        )
+                encoded_metadata[str(k)] = _encode_metadata_value(str(v))
+
+        try:
+            put_args = {'ContentType': content_type}
+            if encoded_metadata:
+                put_args['Metadata'] = encoded_metadata
+            _put_object(**put_args)
+        except Exception as put_error:
+            error_text = str(put_error)
+            if 'SignatureDoesNotMatch' not in error_text:
+                raise
+            logger.warning('⚠️ R2 PutObject signature mismatch; retrying without object metadata')
+            try:
+                _put_object(ContentType=content_type)
+            except Exception as retry_error:
+                if 'SignatureDoesNotMatch' not in str(retry_error):
+                    raise
+                logger.warning('⚠️ R2 PutObject still mismatched; retrying with bare body')
+                _put_object()
         
         logger.info(f"✅ Uploaded to R2: {destination_key} ({len(data)} bytes)")
         
