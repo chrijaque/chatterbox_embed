@@ -1569,7 +1569,7 @@ class ChatterboxTTS:
         logger.info(f"  - metadata: {metadata}")
         
         try:
-            # Step 1: Load voice profile from base64 or R2 storage path
+            # Step 1: Load voice profile from base64, R2 path, or app-issued presigned URL
             if profile_base64:
                 logger.info(f"  - Step 1: Loading voice profile from base64...")
                 profile_bytes = base64.b64decode(profile_base64)
@@ -1580,10 +1580,15 @@ class ChatterboxTTS:
                     bucket_hint = (metadata or {}).get('bucket_name') if isinstance(metadata, dict) else None
                     country_hint = (metadata or {}).get('country_code') if isinstance(metadata, dict) else None
                     resolved_bucket = resolve_bucket_name(bucket_hint, country_hint)
+                    profile_url = None
+                    if isinstance(metadata, dict):
+                        profile_url = metadata.get('profile_url') or metadata.get('profileUrl')
                     
-                    # resolve_bucket_name() always returns an R2 bucket (ignores non-R2 bucket names)
                     logger.info(f"    - Using R2 download (bucket={resolved_bucket})")
-                    profile_bytes = download_from_r2(profile_path)
+                    profile_bytes = download_from_r2(profile_path, bucket_name=resolved_bucket)
+                    if not profile_bytes and profile_url:
+                        logger.warning("    - R2 SDK download failed; falling back to presigned profile URL")
+                        profile_bytes = download_from_r2(profile_url)
                     if not profile_bytes:
                         raise ValueError(f"Failed to download profile from R2: {profile_path}")
                     logger.info(f"    - Voice profile downloaded from R2 (bucket={resolved_bucket})")

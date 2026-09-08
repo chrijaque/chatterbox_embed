@@ -9,6 +9,8 @@ from .bucket_resolver import (
 from .r2_storage import (
     upload_to_r2,
     download_from_r2,
+    download_http,
+    get_r2_client,
     init_firestore_client,
     _encode_metadata_value,
 )
@@ -21,6 +23,8 @@ __all__ = [
     'generate_unique_voice_id',
     'upload_to_r2',
     'download_from_r2',
+    'download_http',
+    'get_r2_client',
     'init_firestore_client',
     '_encode_metadata_value',
 ]
