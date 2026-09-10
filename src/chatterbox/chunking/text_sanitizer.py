@@ -769,7 +769,12 @@ class AdvancedTextSanitizer:
         
         # Normalize language code
         language = language.lower().strip() if language else 'en'
-        
+
+        # Scripts handled by the multilingual tokenizer should not be rejected
+        # against the English ASCII allowlist.
+        if language not in self.LANGUAGE_ALLOWED_CHARS:
+            return True, None, None
+
         # Get allowed character set for language, default to English
         lang_config = self.LANGUAGE_ALLOWED_CHARS.get(language, self.LANGUAGE_ALLOWED_CHARS['en'])
         allowed_chars = lang_config['allowed']

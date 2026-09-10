@@ -191,7 +191,7 @@ class CausalConditionalCFM(ConditionalCFM):
         self.rand_noise = torch.randn([1, 80, 50 * 300])
 
     @torch.inference_mode()
-    def forward(self, mu, mask, n_timesteps, temperature=1.0, spks=None, cond=None):
+    def forward(self, mu, mask, n_timesteps, temperature=1.0, spks=None, cond=None, noised_mels=None, meanflow=False):
         """Forward diffusion
 
         Args:
@@ -204,11 +204,21 @@ class CausalConditionalCFM(ConditionalCFM):
             spks (torch.Tensor, optional): speaker ids. Defaults to None.
                 shape: (batch_size, spk_emb_dim)
             cond: Not used but kept for future purposes
+            noised_mels: gt mels noised at time t (Turbo meanflow)
+            meanflow: use distilled meanflow Euler (Turbo)
 
         Returns:
             sample: generated mel-spectrogram
                 shape: (batch_size, n_feats, mel_timesteps)
         """
+
+        if meanflow:
+            z = torch.randn_like(mu)
+            if noised_mels is not None:
+                prompt_len = mu.size(2) - noised_mels.size(2)
+                z[..., prompt_len:] = noised_mels
+            t_span = torch.linspace(0, 1, n_timesteps + 1, device=mu.device, dtype=mu.dtype)
+            return self.basic_euler(z, t_span=t_span, mu=mu, mask=mask, spks=spks, cond=cond), None
 
         z = self.rand_noise[:, :, :mu.size(2)].to(mu.device).to(mu.dtype) * temperature
         # fix prompt and overlap part mu and z
@@ -216,3 +226,21 @@ class CausalConditionalCFM(ConditionalCFM):
         if self.t_scheduler == 'cosine':
             t_span = 1 - torch.cos(t_span * 0.5 * torch.pi)
         return self.solve_euler(z, t_span=t_span, mu=mu, mask=mask, spks=spks, cond=cond), None
+
+    def basic_euler(self, x, t_span, mu, mask, spks, cond):
+        """Meanflow / distilled Euler used by Chatterbox Turbo."""
+        in_dtype = x.dtype
+        estimator_dtype = next(self.estimator.parameters()).dtype
+
+        def _cast(t):
+            if t is None or not torch.is_tensor(t) or not t.dtype.is_floating_point:
+                return t
+            return t.to(estimator_dtype) if t.dtype != estimator_dtype else t
+
+        x, t_span, mu, mask, spks, cond = (_cast(t) for t in (x, t_span, mu, mask, spks, cond))
+        for t, r in zip(t_span[..., :-1], t_span[..., 1:]):
+            t, r = t[None], r[None]
+            dxdt = self.estimator.forward(x, mask=mask, mu=mu, t=t, spks=spks, cond=cond, r=r)
+            dt = r - t
+            x = x + dt * dxdt
+        return x.to(in_dtype)

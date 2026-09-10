@@ -1,0 +1,8 @@
+# Extra dependencies for Turbo and Multilingual Chatterbox workers only.
+# Original English workers should keep the main requirements.txt unchanged.
+omegaconf
+pykakasi==2.3.0
+spacy-pkuseg
+pyloudnorm
+transformers==5.2.0
+

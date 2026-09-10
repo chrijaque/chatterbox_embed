@@ -85,6 +85,9 @@ class ChatterboxVC:
         logger.info(f"✅ ChatterboxVC initialized successfully")
         logger.info(f"  - Available methods: {[m for m in dir(self) if not m.startswith('_')]}")
 
+        self.family_tts = None
+        self.model_family = "original"
+
         # Loudness normalization disabled
         self.enable_loudness_normalization = False
 
@@ -196,9 +199,21 @@ class ChatterboxVC:
         return result
 
     @classmethod
-    def from_pretrained(cls, device) -> 'ChatterboxVC':
+    def from_pretrained(cls, device, family: str = None) -> 'ChatterboxVC':
         logger.info(f"🔧 ChatterboxVC.from_pretrained called")
         logger.info(f"  - device: {device}")
+
+        from .factory import get_model_family, load_tts_model
+        resolved_family = get_model_family(family)
+        if resolved_family in ("turbo", "mtl"):
+            logger.info("Loading family TTS backend for voice cloning: %s", resolved_family)
+            tts = load_tts_model(device, resolved_family)
+            inst = cls(tts.t3, tts.s3gen, tts.ve, tts.tokenizer, device)
+            inst.family_tts = tts
+            inst.model_family = resolved_family
+            inst.sr = tts.sr
+            logger.info("✅ ChatterboxVC ready with %s family backend", resolved_family)
+            return inst
         
         # Check if MPS is available on macOS
         if device == "cuda" and not torch.cuda.is_available():
@@ -615,6 +630,12 @@ class ChatterboxVC:
         logger.info(f"  - save_path: {save_path}")
         
         try:
+            if getattr(self, "family_tts", None) is not None:
+                logger.info("  - Saving family-specific voice profile (%s)", self.model_family)
+                self.family_tts.save_voice_profile(audio_file_path, save_path)
+                logger.info("✅ ChatterboxVC.save_voice_profile completed via %s", self.model_family)
+                return
+
             # Load reference audio
             logger.info(f"  - Loading reference audio...")
             ref_wav, sr = librosa.load(audio_file_path, sr=None)
@@ -680,6 +701,9 @@ class ChatterboxVC:
         logger.info(f"📂 Loading voice profile from {path}")
         
         try:
+            if getattr(self, "family_tts", None) is not None:
+                return self.family_tts.load_voice_profile(path)
+
             data = np.load(path, allow_pickle=True).item()
             
             # Create VoiceProfile object
@@ -717,6 +741,11 @@ class ChatterboxVC:
         logger.info(f"  - voice_profile_path: {voice_profile_path}")
         
         try:
+            if getattr(self, "family_tts", None) is not None:
+                self.family_tts.load_voice_profile(voice_profile_path)
+                logger.info("✅ ChatterboxVC.set_voice_profile completed via %s", self.model_family)
+                return
+
             # Load the voice profile
             logger.info(f"  - Loading voice profile...")
             profile = self.load_voice_profile(voice_profile_path)
@@ -894,13 +923,23 @@ class ChatterboxVC:
             sample_generated_via = "tts"
             try:
                 # Use the TTS stitcher with the saved profile for consistent loudness
-                # Lazy import to avoid circular dependency
-                from .tts import ChatterboxTTS
-                tts_model = ChatterboxTTS.from_pretrained(self.device)
-                sample_text_final = sample_text if sample_text else (
+                if getattr(self, "family_tts", None) is not None:
+                    tts_model = self.family_tts
+                else:
+                    # Lazy import to avoid circular dependency
+                    from .tts import ChatterboxTTS
+                    tts_model = ChatterboxTTS.from_pretrained(self.device)
+                clone_language = (metadata or {}).get("language") or "en"
+                if sample_text:
+                    sample_text_final = sample_text
+                elif getattr(self, "family_tts", None) is not None:
+                    from .factory import sample_text_for_language
+                    sample_text_final = sample_text_for_language(clone_language, voice_name)
+                else:
+                    sample_text_final = (
                     f"Hello, this is the voice profile of {voice_name or 'this voice'}. I can be used to narrate whimsical stories and fairytales."
-                )
-                audio_tensor, sr, _meta = tts_model.generate_long_text(
+                    )
+                gen_kwargs = dict(
                     text=sample_text_final,
                     voice_profile_path=profile_local_path,
                     output_path="./temp_sample_preview.wav",
@@ -912,6 +951,9 @@ class ChatterboxVC:
                     pause_scale=0.9,
                     adaptive_voice_param_blend=0.2,
                 )
+                if getattr(self, "family_tts", None) is not None:
+                    gen_kwargs["language"] = clone_language
+                audio_tensor, sr, _meta = tts_model.generate_long_text(**gen_kwargs)
                 sample_audio = audio_tensor
                 logger.info(f"    - Sample audio generated via TTS, shape: {sample_audio.shape}")
 
