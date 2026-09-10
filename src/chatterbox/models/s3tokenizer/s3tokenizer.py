@@ -19,6 +19,21 @@ S3_TOKEN_RATE = 25
 SPEECH_VOCAB_SIZE = 6561
 
 
+def _as_float32_wav_tensor(wav) -> torch.Tensor:
+    """MPS cannot store float64; librosa arrays are float64 by default."""
+    if isinstance(wav, np.ndarray):
+        if wav.dtype != np.float32:
+            wav = wav.astype(np.float32, copy=False)
+        return torch.from_numpy(wav)
+    if torch.is_tensor(wav):
+        if wav.dtype == torch.float32:
+            return wav
+        if wav.device.type == "mps":
+            return wav.to("cpu").float()
+        return wav.float()
+    return torch.as_tensor(wav, dtype=torch.float32)
+
+
 class S3Tokenizer(S3TokenizerV2):
     """
     s3tokenizer.S3TokenizerV2 with the following changes:
@@ -57,8 +72,7 @@ class S3Tokenizer(S3TokenizerV2):
         """
         processed_wavs = []
         for wav in wavs:
-            if isinstance(wav, np.ndarray):
-                wav = torch.from_numpy(wav)
+            wav = _as_float32_wav_tensor(wav)
             if wav.dim() == 1:
                 wav = wav.unsqueeze(0)
 
@@ -79,8 +93,7 @@ class S3Tokenizer(S3TokenizerV2):
         """Prepare a list of audios for s3tokenizer processing."""
         processed_wavs = []
         for wav in wavs:
-            if isinstance(wav, np.ndarray):
-                wav = torch.from_numpy(wav)
+            wav = _as_float32_wav_tensor(wav)
             if wav.dim() == 1:
                 wav = wav.unsqueeze(0)
 
@@ -147,9 +160,7 @@ class S3Tokenizer(S3TokenizerV2):
         torch.Tensor, shape = (128, n_frames)
             A Tensor that contains the Mel spectrogram
         """
-        if not torch.is_tensor(audio):
-            audio = torch.from_numpy(audio)
-
+        audio = _as_float32_wav_tensor(audio)
         audio = audio.to(self.device)
         if padding > 0:
             audio = F.pad(audio, (0, padding))
